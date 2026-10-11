@@ -852,7 +852,50 @@ function createEditor(root, doc, onChange) {
   const textEl = (id) => rowEl(id)?.querySelector('.blk-text');
   let slash = null; // { id, start, hl, items }
 
-  const change = () => onChange();
+  // ---- 되돌리기 기록 (화면을 다시 그리면 브라우저 기본 기록이 사라져서 직접 관리) ----
+  const undoStack = [], redoStack = [];
+  const caretNow = () => {
+    const t = document.activeElement?.closest?.('.blk-text');
+    const row = t && root.contains(t) ? t.closest('.blk') : null;
+    return row ? { id: row.dataset.id, off: caretOffset(t) } : null;
+  };
+  const snap = () => ({ blocks: JSON.parse(JSON.stringify(blocks)), sel: caretNow() });
+  let last = snap();
+  let lastJson = JSON.stringify(last.blocks);
+  let typingTimer = null;
+  function commit() {
+    clearTimeout(typingTimer);
+    typingTimer = null;
+    const cur = JSON.stringify(blocks);
+    if (cur === lastJson) return;
+    undoStack.push(last);
+    if (undoStack.length > 200) undoStack.shift();
+    redoStack.length = 0;
+    last = snap();
+    lastJson = cur;
+  }
+  function restore(from, to) {
+    commit();
+    if (!from.length) return;
+    to.push(snap());
+    const s = from.pop();
+    blocks.splice(0, blocks.length, ...JSON.parse(JSON.stringify(s.blocks)));
+    last = s;
+    lastJson = JSON.stringify(blocks);
+    closeSlash();
+    render();
+    const target = s.sel && blocks.find((b) => b.id === s.sel.id) ? s.sel : blocks[0] && { id: blocks[0].id, off: 'end' };
+    if (target) focus(target.id, target.off < 0 ? 'end' : target.off);
+    onChange();
+  }
+  const undo = () => restore(undoStack, redoStack);
+  const redo = () => restore(redoStack, undoStack);
+
+  // 구조가 바뀌면 바로 한 단계, 타이핑은 잠깐 멈출 때마다 한 단계
+  const change = () => { onChange(); commit(); };
+  const typed = () => { onChange(); clearTimeout(typingTimer); typingTimer = setTimeout(commit, 700); };
+  // 버튼·메뉴·끌기 전에 치던 글을 먼저 한 단계로 끊는다
+  root.addEventListener('mousedown', () => { if (typingTimer) commit(); }, true);
 
   const ind = (b) => b.indent || 0;
   // i 번째 블록과 그 하위 블록들의 끝(다음 형제 위치)
@@ -1013,7 +1056,7 @@ function createEditor(root, doc, onChange) {
     if (b.type === 'code') {
       const lang = h('div', { class: 'code-lang', contenteditable: 'plaintext-only', spellcheck: 'false' });
       lang.textContent = b.lang || '';
-      lang.addEventListener('input', () => { b.lang = lang.textContent.trim(); change(); });
+      lang.addEventListener('input', () => { b.lang = lang.textContent.trim(); typed(); });
       lang.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); focus(b.id, 'start'); } });
       body.append(lang);
     }
@@ -1031,7 +1074,7 @@ function createEditor(root, doc, onChange) {
       if (b.open && b.body) {
         const tb = h('div', { class: 'blk-text', contenteditable: 'true', spellcheck: 'false', 'data-ph': '빈 토글이에요. 내용을 적어보세요' });
         tb.innerHTML = mdToHtml(b.body || '');
-        tb.addEventListener('input', () => { if (tb.innerHTML === '<br>') tb.innerHTML = ''; b.body = htmlToMd(tb); change(); });
+        tb.addEventListener('input', () => { if (tb.innerHTML === '<br>') tb.innerHTML = ''; b.body = htmlToMd(tb); typed(); });
         tb.addEventListener('keydown', (e) => {
           if (e.isComposing || e.keyCode === 229) return;
           if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); document.execCommand('insertLineBreak'); }
@@ -1099,10 +1142,11 @@ function createEditor(root, doc, onChange) {
         }
       }
       if (slash && slash.id === b.id) updateSlash(el);
-      change();
+      typed();
     });
     el.addEventListener('keydown', (e) => onKey(e, el, b));
     el.addEventListener('beforeinput', (e) => {
+      if (e.inputType === 'historyUndo' || e.inputType === 'historyRedo') { e.preventDefault(); (e.inputType === 'historyUndo' ? undo : redo)(); return; }
       const fake = (key) => ({ key, shiftKey: false, metaKey: false, ctrlKey: false, isComposing: false, keyCode: 0, preventDefault() {} });
       if (e.inputType === 'insertParagraph' && b.type !== 'code') { e.preventDefault(); onKey(fake('Enter'), el, b); }
       else if (e.inputType === 'deleteContentBackward' && getSelection().isCollapsed && caretOffset(el) === 0) { e.preventDefault(); onKey(fake('Backspace'), el, b); }
@@ -1150,6 +1194,14 @@ function createEditor(root, doc, onChange) {
 
   function onKey(e, el, b) {
     if (e.isComposing || e.keyCode === 229) return;
+    const modZ = (e.metaKey || e.ctrlKey) && !e.altKey;
+    if (modZ && (e.key.toLowerCase() === 'z' || (e.key.toLowerCase() === 'y' && !e.shiftKey))) {
+      e.preventDefault();
+      (e.key.toLowerCase() === 'y' || e.shiftKey ? redo : undo)();
+      return;
+    }
+    // 글자 말고 다른 키(Enter·지우기·Tab·화살표·단축키)를 누르기 전에 치던 글을 한 단계로 끊는다
+    if (typingTimer && (e.key.length > 1 || e.metaKey || e.ctrlKey)) commit();
     if (slash && slash.id === b.id) {
       if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
         e.preventDefault();
@@ -1383,8 +1435,20 @@ function createEditor(root, doc, onChange) {
     if (b && el) indentAndKeepCaret(b, el, d);
   }
 
-  return { render, focus, indentById };
+  return { render, focus, indentById, undo, redo };
 }
+
+document.addEventListener('keydown', (e) => {
+  if (e.defaultPrevented || !editor || !state.page || !location.hash.startsWith('#/p/')) return;
+  if (!(e.metaKey || e.ctrlKey) || e.altKey) return;
+  const k = e.key.toLowerCase();
+  if (k !== 'z' && k !== 'y') return;
+  const t = e.target;
+  // 제목·태그 같은 입력칸은 브라우저 기본 되돌리기를 쓴다
+  if (t.closest?.('input, textarea, .page-title, .code-lang')) return;
+  e.preventDefault();
+  (k === 'y' || e.shiftKey ? editor.redo : editor.undo)();
+});
 
 // ---------- 모바일 편집 툴바 (Tab 키가 없어서) ----------
 if (TOUCH) {
