@@ -315,6 +315,8 @@ const ghApi = (() => {
 const api = LOCAL ? localApi : ghApi;
 
 // ---------- 인라인 마크다운 <-> HTML ----------
+const URL_RE = /\bhttps?:\/\/[^\s<>"]+[^\s<>".,;:!?)\]'’]/g;
+const isUrl = (t) => /^https?:\/\/\S+$/.test(t.trim());
 function mdToHtml(md) {
   if (!md) return '';
   const codes = [];
@@ -325,6 +327,8 @@ function mdToHtml(md) {
     .replace(/\*\*(.+?)\*\*/g, '<b>$1</b>')
     .replace(/(^|[^*])\*([^*]+?)\*/g, '$1<i>$2</i>')
     .replace(/~~(.+?)~~/g, '<s>$1</s>');
+  // 그냥 적은 주소도 링크로 (이미 <a> 안에 있는 건 빼고)
+  s = s.split(/(<a [^>]*>.*?<\/a>)/).map((part, i) => (i % 2 ? part : part.replace(URL_RE, (u) => `<a href="${u}">${u}</a>`))).join('');
   return s.replace(/\u0000(\d+)\u0000/g, (_, i) => `<code>${escapeHtml(codes[i])}</code>`);
 }
 
@@ -341,7 +345,11 @@ function htmlToMd(root) {
     if (tag === 'b' || tag === 'strong' || (tag === 'span' && /bold|[6-9]00/.test(st.fontWeight))) return wrap('**');
     if (tag === 'i' || tag === 'em' || (tag === 'span' && st.fontStyle === 'italic')) return wrap('*');
     if (tag === 's' || tag === 'strike' || tag === 'del') return wrap('~~');
-    if (tag === 'a') { out += '['; node.childNodes.forEach(walk); out += `](${node.getAttribute('href') || ''})`; return; }
+    if (tag === 'a') {
+      const href = node.getAttribute('href') || '';
+      if (node.textContent === href && isUrl(href)) { out += href; return; }
+      out += '['; node.childNodes.forEach(walk); out += `](${href})`; return;
+    }
     if ((tag === 'div' || tag === 'p') && out && !out.endsWith('<br>')) out += '<br>';
     node.childNodes.forEach(walk);
   };
@@ -1264,6 +1272,7 @@ function createEditor(root, doc, onChange) {
       syncFromDom(b);
       if (b.type !== 'code' && !e.isComposing) {
         if (markdownShortcut(el, b, e)) return;
+        if (e.inputType === 'insertText' && e.data && /\s/.test(e.data)) relink(el, b);
         if (e.inputType === 'insertText' && e.data && e.data.includes('/')) {
           const start = caretOffset(el) - e.data.length + e.data.lastIndexOf('/');
           const before = el.textContent[start - 1];
@@ -1286,7 +1295,7 @@ function createEditor(root, doc, onChange) {
       if (!a) return;
       const href = a.getAttribute('href') || '';
       if (href.startsWith('#/')) { e.preventDefault(); location.hash = href; }
-      else if (e.metaKey || e.ctrlKey) { e.preventDefault(); window.open(href, '_blank', 'noopener'); }
+      else if (/^https?:/.test(href)) { e.preventDefault(); window.open(href, '_blank', 'noopener'); }
     });
     el.addEventListener('blur', () => { if (slash && slash.id === b.id) setTimeout(() => { if (document.activeElement !== el) closeSlash(); }, 120); });
   }
@@ -1457,9 +1466,39 @@ function createEditor(root, doc, onChange) {
   }
 
   // 여러 줄 붙여넣기 → 마크다운으로 해석해서 블록으로
+  // 글 속 주소를 링크로 바꿔 다시 그린다. 캐럿은 링크 바로 뒤(링크 밖)에 둔다
+  function relink(el, b) {
+    if (b.type === 'code') return;
+    const w = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+    let bare = false, n;
+    while (!bare && (n = w.nextNode())) { URL_RE.lastIndex = 0; bare = !n.parentElement.closest('a') && URL_RE.test(n.nodeValue); }
+    URL_RE.lastIndex = 0;
+    if (!bare) return;
+    const off = caretOffset(el);
+    syncFromDom(b);
+    el.innerHTML = mdToHtml(b.text);
+    if (off < 0) return;
+    const r = rangeAt(el, off);
+    const a = r.startContainer.parentElement?.closest('a');
+    if (a && r.startOffset === r.startContainer.nodeValue?.length) { r.setStartAfter(a); r.collapse(true); }
+    const sel = getSelection();
+    sel.removeAllRanges();
+    sel.addRange(r);
+  }
+
   function onPaste(e, el, b) {
     const t = e.clipboardData.getData('text/plain');
     e.preventDefault();
+    // 주소 하나만 붙여넣으면: 글자를 골라뒀으면 그 글자에 링크, 아니면 주소를 링크로
+    if (b.type !== 'code' && isUrl(t)) {
+      const url = t.trim();
+      if (!getSelection().isCollapsed) { document.execCommand('createLink', false, url); syncFromDom(b); typed(); return; }
+      document.execCommand('insertText', false, url);
+      relink(el, b);
+      syncFromDom(b);
+      typed();
+      return;
+    }
     if (b.type === 'code' || !t.includes('\n')) { document.execCommand('insertText', false, t); return; }
     const parsed = mdToBlocks(t);
     if (!parsed.length) return;
