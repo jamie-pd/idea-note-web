@@ -260,8 +260,9 @@ const state = {
   expanded: store.get('expanded', {}),
 };
 const byId = (id) => state.pages.find((p) => p.id === id);
+const isRetro = (p) => p && p.kind === 'retro';
 const childrenOf = (id) => state.pages
-  .filter((p) => (p.parent || null) === (id || null))
+  .filter((p) => (p.parent || null) === (id || null) && !(id == null && isRetro(p)))
   .sort((a, b) => (a.order ?? 0) - (b.order ?? 0) || String(a.created).localeCompare(String(b.created)));
 
 // ---------- 저장 ----------
@@ -306,7 +307,9 @@ async function route() {
   document.body.classList.remove('side-open');
   const hash = location.hash || '#/board';
   const m = hash.match(/^#\/p\/([a-z0-9-]+)/);
+  const r = hash.match(/^#\/retro(?:\/(week|month))?/);
   if (m) await openPage(m[1]);
+  else if (r) renderRetro(r[1] || 'week');
   else renderBoard();
   renderTree();
 }
@@ -318,7 +321,8 @@ function renderTree() {
   const q = $('#search').value.trim().toLowerCase();
   tree.innerHTML = '';
   const activeId = state.page && location.hash.startsWith('#/p/') ? state.page.id : null;
-  document.querySelectorAll('.side-nav .side-item').forEach((a) => a.classList.toggle('active', !activeId && a.dataset.route === 'board'));
+  const navRoute = activeId ? (isRetro(state.page.meta) ? 'retro' : null) : location.hash.startsWith('#/retro') ? 'retro' : 'board';
+  document.querySelectorAll('.side-nav .side-item').forEach((a) => a.classList.toggle('active', a.dataset.route === navRoute));
 
   if (q) {
     const hits = state.pages.filter((p) => [p.title, p.preview, ...(p.tags || [])].join(' ').toLowerCase().includes(q));
@@ -378,7 +382,7 @@ function renderGit() {
     h('span', { class: `git-dot ${dirty ? 'dirty' : ''}` }),
     h('span', { class: 'git-text' },
       dirty ? `커밋 안 한 변경 ${gitInfo.changes}개` : '모두 커밋됨',
-      h('div', { class: 'git-sub' }, gitInfo.last ? `마지막 커밋 ${ago(gitInfo.last)}` : '아직 커밋 없음')),
+      h('div', { class: 'git-sub' }, (gitInfo.last ? `마지막 커밋 ${ago(gitInfo.last)}` : '아직 커밋 없음') + (gitInfo.remote ? ' · 원격 연결됨' : ' · 원격 없음'))),
     btn));
 }
 function openCommitPop(anchor) {
@@ -387,7 +391,8 @@ function openCommitPop(anchor) {
     savePage.flush();
     const r = await api.commit(input.value);
     closePop();
-    toast(r.ok ? (r.nothing ? '커밋할 변경이 없어요' : '커밋했어요') : '커밋 실패: ' + (r.out || r.error || ''));
+    toast(!r.ok ? '커밋 실패: ' + (r.out || r.error || '') : r.nothing ? '커밋할 변경이 없어요'
+      : r.pushed === true ? '커밋하고 원격에 올렸어요' : r.pushed === false ? '커밋은 했지만 push 는 실패했어요' : '커밋했어요 (이 컴퓨터에만 있어요)');
     refreshGit.flush();
   };
   input.addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.isComposing) go(); if (e.key === 'Escape') closePop(); });
@@ -467,7 +472,7 @@ async function deletePage(id) {
   await api.remove(id);
   state.pages = state.pages.filter((x) => x.id !== id);
   if (state.page?.id === id) state.page = null;
-  location.hash = p.parent ? `#/p/${p.parent}` : '#/board';
+  location.hash = p.parent ? `#/p/${p.parent}` : isRetro(p) ? `#/retro/${p.period}` : '#/board';
   renderTree();
   refreshGit();
 }
@@ -562,13 +567,18 @@ function renderCrumbs() {
   const c = $('#crumbs');
   c.innerHTML = '';
   if (!state.page || !location.hash.startsWith('#/p/')) {
-    c.append(h('span', { class: 'crumb' }, '📋 아이디어 보드'));
+    c.append(h('span', { class: 'crumb' }, location.hash.startsWith('#/retro') ? '🗓️ 주별 · 월별 회고' : '📋 아이디어 보드'));
     return;
   }
   const chain = [];
   let cur = byId(state.page.id) || { id: state.page.id, ...state.page.meta };
   const seen = new Set();
   while (cur && !seen.has(cur.id)) { seen.add(cur.id); chain.unshift(cur); cur = cur.parent ? byId(cur.parent) : null; }
+  const root = chain[0]?.id === state.page.id ? state.page.meta : chain[0];
+  if (isRetro(root)) {
+    c.append(h('a', { class: 'crumb', href: `#/retro/${root.period}` }, `🗓️ ${root.period === 'month' ? '월별' : '주별'} 회고`));
+    c.append(h('span', { class: 'crumb-sep' }, '/'));
+  }
   chain.forEach((p, i) => {
     if (i) c.append(h('span', { class: 'crumb-sep' }, '/'));
     const meta = p.id === state.page.id ? state.page.meta : p;
@@ -582,6 +592,7 @@ function statusPill(key) {
 }
 
 function renderProps(meta) {
+  if (isRetro(meta)) return renderRetroProps(meta);
   const props = h('div', { class: 'props' });
   // 상태
   const statusV = h('div', { class: 'prop-v click' }, statusPill(meta.status));
@@ -1119,6 +1130,179 @@ fmtBar.addEventListener('click', (e) => {
   fireInput(el);
 });
 
+// ---------- 주별 · 월별 회고 ----------
+const pad2 = (n) => String(n).padStart(2, '0');
+const DAY = 864e5;
+function isoWeek(d) {
+  const t = new Date(Date.UTC(d.getFullYear(), d.getMonth(), d.getDate()));
+  t.setUTCDate(t.getUTCDate() + 4 - (t.getUTCDay() || 7));
+  const y = t.getUTCFullYear();
+  return { y, w: Math.ceil(((t - Date.UTC(y, 0, 1)) / DAY + 1) / 7) };
+}
+function weekMonday(y, w) {
+  const jan4 = new Date(y, 0, 4);
+  return new Date(y, 0, 4 - (jan4.getDay() || 7) + 1 + (w - 1) * 7);
+}
+const periodKey = (period, d) => {
+  if (period === 'month') return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}`;
+  const { y, w } = isoWeek(d);
+  return `${y}-w${pad2(w)}`;
+};
+// 기간 정보: 시작·끝(끝은 포함 안 함)·이름
+function periodInfo(period, key) {
+  if (period === 'month') {
+    const [y, m] = key.split('-').map(Number);
+    const start = new Date(y, m - 1, 1), end = new Date(y, m, 1);
+    return { start, end, label: `${y}년 ${m}월`, range: `${m}월 1일 – ${m}월 ${new Date(y, m, 0).getDate()}일` };
+  }
+  const [y, w] = key.split('-w').map(Number);
+  const start = weekMonday(y, w), end = new Date(start.getTime() + 7 * DAY);
+  const thu = new Date(start.getTime() + 3 * DAY);
+  const last = new Date(end.getTime() - DAY);
+  return {
+    start, end,
+    label: `${thu.getMonth() + 1}월 ${Math.ceil(thu.getDate() / 7)}주차`,
+    range: `${start.getMonth() + 1}월 ${start.getDate()}일 – ${last.getMonth() + 1}월 ${last.getDate()}일`,
+  };
+}
+const shiftKey = (period, key, delta) => {
+  const { start } = periodInfo(period, key);
+  const d = period === 'month' ? new Date(start.getFullYear(), start.getMonth() + delta, 1) : new Date(start.getTime() + delta * 7 * DAY + DAY);
+  return periodKey(period, d);
+};
+const retroId = (period, key) => `retro-${key}`;
+const ideasIn = (period, key) => {
+  const { start, end } = periodInfo(period, key);
+  return state.pages.filter((p) => !isRetro(p) && p.created && new Date(p.created) >= start && new Date(p.created) < end);
+};
+
+const RETRO_TEMPLATES = {
+  week: [
+    '<aside>🗓️ 이번 주를 5분만 돌아봐요. 다음 주에 가져갈 것 하나면 충분해요.</aside>',
+    '## 👍 좋았던 것 (Keep)', '- ',
+    '## 🤔 아쉬웠던 것 (Problem)', '- ',
+    '## 🧪 다음 주에 해볼 것 (Try)', '- [ ] ',
+    '## 한 줄 메모', '',
+  ],
+  month: [
+    '<aside>📅 한 달을 돌아보고, 다음 달에 가져갈 것 하나만 정해요.</aside>',
+    '## 🌟 이번 달 잘한 것', '- ',
+    '## 🌧️ 아쉬웠던 것', '- ',
+    '## 💡 배운 것', '- ',
+    '## 🙌 고마운 사람', '- ',
+    '## 🎯 다음 달 목표', '- [ ] ',
+    '## 한 줄 평', '',
+  ],
+};
+
+async function startRetro(period, key) {
+  const id = retroId(period, key);
+  if (!byId(id)) {
+    const info = periodInfo(period, key);
+    const meta = { kind: 'retro', period, key, icon: period === 'month' ? '📅' : '🗓️', title: `${info.label} 회고`, tags: [] };
+    const res = await api.save(id, meta, RETRO_TEMPLATES[period].join('\n\n'));
+    upsertListEntry({ id, ...res.meta, preview: '' });
+    refreshGit();
+  }
+  location.hash = `#/p/${id}`;
+}
+
+function scoreStars(meta, onSet) {
+  const wrap = h('span', { class: 'stars', title: onSet ? '이 기간 점수' : null });
+  for (let i = 1; i <= 5; i++) {
+    wrap.append(h(onSet ? 'button' : 'span', { class: `star ${i <= (meta.score || 0) ? 'on' : ''}`, onclick: onSet ? () => onSet(meta.score === i ? 0 : i) : null }, '★'));
+  }
+  return wrap;
+}
+
+function ideaChips(list) {
+  if (!list.length) return h('span', { class: 'prop-muted' }, '이 기간에 만든 아이디어가 없어요');
+  return list.map((p) => h('a', { class: 'idea-chip', href: `#/p/${p.id}` }, `${p.icon || statusOf(p.status).icon} ${p.title || '제목 없음'}`));
+}
+
+function renderRetroProps(meta) {
+  const info = periodInfo(meta.period, meta.key);
+  const scoreV = h('div', { class: 'prop-v' });
+  const drawScore = () => { scoreV.innerHTML = ''; scoreV.append(scoreStars(meta, (n) => { meta.score = n || null; drawScore(); savePage(); })); };
+  drawScore();
+  const ideas = ideasIn(meta.period, meta.key);
+  const props = h('div', { class: 'props' },
+    h('div', { class: 'prop-k' }, '◷ 기간'), h('div', { class: 'prop-v' }, `${info.label}`, h('span', { class: 'prop-muted' }, info.range)),
+    h('div', { class: 'prop-k' }, '★ 점수'), scoreV,
+    h('div', { class: 'prop-k' }, `💡 아이디어 ${ideas.length}`), h('div', { class: 'prop-v' }, ideaChips(ideas)),
+  );
+  if (meta.period === 'month') {
+    const weeks = state.pages.filter((p) => isRetro(p) && p.period === 'week' && (() => {
+      const wi = periodInfo('week', p.key); const mi = periodInfo('month', meta.key);
+      const thu = new Date(wi.start.getTime() + 3 * DAY);
+      return thu >= mi.start && thu < mi.end;
+    })()).sort((a, b) => a.key.localeCompare(b.key));
+    props.append(h('div', { class: 'prop-k' }, '🗓️ 주간 회고'),
+      h('div', { class: 'prop-v' }, weeks.length ? weeks.map((w) => h('a', { class: 'idea-chip', href: `#/p/${w.id}` }, periodInfo('week', w.key).label, w.score ? ` · ${'★'.repeat(w.score)}` : '')) : h('span', { class: 'prop-muted' }, '이 달에 쓴 주간 회고가 없어요')));
+  }
+  return props;
+}
+
+const retroCursor = { week: periodKey('week', new Date()), month: periodKey('month', new Date()) };
+
+function renderRetro(period) {
+  state.page = null;
+  $('#page-more').hidden = true;
+  setSaveText('');
+  renderCrumbs();
+  const view = $('#view');
+  view.innerHTML = '';
+  const key = retroCursor[period];
+  const info = periodInfo(period, key);
+  const nowKey = periodKey(period, new Date());
+  const existing = byId(retroId(period, key));
+  const ideas = ideasIn(period, key);
+  const go = (d) => { retroCursor[period] = shiftKey(period, key, d); renderRetro(period); };
+
+  const counts = STATUSES.map((s) => ({ s, n: ideas.filter((p) => (p.status || 'spark') === s.key).length }));
+  const current = h('div', { class: 'retro-current' },
+    h('div', { class: 'retro-nav' },
+      h('button', { class: 'icon-btn', title: period === 'month' ? '지난달' : '지난주', onclick: () => go(-1) }, '‹'),
+      h('div', { class: 'retro-period' }, h('div', { class: 'rp-label' }, info.label, key === nowKey ? h('span', { class: 'now-badge' }, period === 'month' ? '이번 달' : '이번 주') : null), h('div', { class: 'rp-range' }, info.range)),
+      h('button', { class: 'icon-btn', title: period === 'month' ? '다음 달' : '다음 주', onclick: () => go(1) }, '›'),
+      key !== nowKey ? h('button', { class: 'chip', onclick: () => { retroCursor[period] = nowKey; renderRetro(period); } }, period === 'month' ? '이번 달로' : '이번 주로') : null,
+    ),
+    h('div', { class: 'retro-stats' },
+      h('div', { class: 'stat' }, h('div', { class: 'stat-n' }, String(ideas.length)), h('div', { class: 'stat-k' }, '새 아이디어')),
+      counts.map(({ s, n }) => h('div', { class: 'stat' }, h('div', { class: 'stat-n' }, String(n)), h('div', { class: 'stat-k' }, `${s.icon} ${s.label}`))),
+    ),
+    ideas.length ? h('div', { class: 'retro-ideas' }, ideaChips(ideas)) : null,
+    existing
+      ? h('a', { class: 'retro-open', href: `#/p/${existing.id}` },
+        h('div', {}, h('div', { class: 'card-title' }, h('span', {}, existing.icon || '🗓️'), h('span', {}, existing.title)), existing.preview ? h('div', { class: 'card-prev' }, existing.preview) : null),
+        h('div', { class: 'retro-open-right' }, existing.score ? scoreStars(existing) : null, h('span', { class: 'btn' }, '이어 쓰기')))
+      : h('button', { class: 'retro-start', onclick: () => startRetro(period, key) },
+        h('span', { style: 'font-size:22px' }, period === 'month' ? '📅' : '🗓️'),
+        h('span', {}, h('b', {}, `${info.label} 회고 쓰기`), h('div', { class: 'pi-sub' }, period === 'month' ? '잘한 것 · 아쉬운 것 · 배운 것 · 다음 달 목표' : 'Keep · Problem · Try 로 5분 정리'))),
+  );
+
+  const past = state.pages.filter((p) => isRetro(p) && p.period === period).sort((a, b) => b.key.localeCompare(a.key));
+  const list = h('div', { class: 'retro-list' },
+    past.length ? past.map((p) => {
+      const pi = periodInfo(period, p.key);
+      return h('a', { class: 'card retro-card', href: `#/p/${p.id}` },
+        h('div', { class: 'retro-card-head' }, h('b', {}, pi.label), h('span', { class: 'prop-muted' }, pi.range), h('span', { style: 'flex:1' }), p.score ? scoreStars(p) : null),
+        p.preview ? h('div', { class: 'card-prev' }, p.preview) : null);
+    }) : h('div', { class: 'col-empty' }, '아직 쓴 회고가 없어요'));
+
+  view.append(h('div', { class: 'board-page retro-page' },
+    h('div', { style: 'font-size:48px;line-height:1' }, '🗓️'),
+    h('h1', { class: 'board-title' }, '회고'),
+    h('p', { class: 'board-desc' }, '한 주, 한 달을 짧게 돌아보고 다음에 해볼 것 하나를 정해요.'),
+    h('div', { class: 'tabs' },
+      h('a', { class: `tab ${period === 'week' ? 'on' : ''}`, href: '#/retro/week' }, '주별'),
+      h('a', { class: `tab ${period === 'month' ? 'on' : ''}`, href: '#/retro/month' }, '월별')),
+    current,
+    h('h3', { class: 'section-title' }, `지난 ${period === 'month' ? '월별' : '주별'} 회고`),
+    list,
+  ));
+}
+
 // ---------- 아이디어 보드 ----------
 function renderBoard() {
   state.page = null;
@@ -1128,8 +1312,8 @@ function renderBoard() {
   const view = $('#view');
   view.innerHTML = '';
 
-  const allTags = [...new Set(state.pages.flatMap((p) => p.tags || []))].sort();
-  const visible = state.pages.filter((p) => !state.tagFilter || (p.tags || []).includes(state.tagFilter));
+  const allTags = [...new Set(state.pages.filter((p) => !isRetro(p)).flatMap((p) => p.tags || []))].sort();
+  const visible = state.pages.filter((p) => !isRetro(p)).filter((p) => !state.tagFilter || (p.tags || []).includes(state.tagFilter));
 
   const input = h('input', { placeholder: '떠오르는 걸 적고 Enter', autocomplete: 'off' });
   input.addEventListener('keydown', async (e) => {
@@ -1215,7 +1399,7 @@ function bindColumnDrop(col, statusKey) {
 
 // 🎲 섞어보기 — 무작위 두 아이디어 + 발상 질문
 function openShuffle() {
-  const pool = state.pages.filter((p) => p.title);
+  const pool = state.pages.filter((p) => p.title && !isRetro(p));
   if (pool.length < 2) { toast('아이디어가 두 개 이상 있어야 섞을 수 있어요'); return; }
   const scrim = h('div', { class: 'modal-scrim', onclick: (e) => { if (e.target === scrim) scrim.remove(); } });
   const modal = h('div', { class: 'modal' });
