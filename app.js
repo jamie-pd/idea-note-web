@@ -73,6 +73,13 @@ const fmtDate = (iso) => {
   const d = new Date(iso);
   return `${d.getFullYear()}년 ${d.getMonth() + 1}월 ${d.getDate()}일 ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
 };
+const ago = (ms) => {
+  const s = Math.max(0, (Date.now() - ms) / 1000);
+  if (s < 60) return '방금 전';
+  if (s < 3600) return `${Math.floor(s / 60)}분 전`;
+  if (s < 86400) return `${Math.floor(s / 3600)}시간 전`;
+  return `${Math.floor(s / 86400)}일 전`;
+};
 const debounce = (fn, ms) => {
   let t;
   const d = (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); };
@@ -270,7 +277,7 @@ const savePage = debounce(async () => {
   const body = blocksToMd(pg.blocks);
   const res = await api.save(pg.id, pg.meta, body);
   pg.meta = res.meta;
-  const preview = body.replace(/[#>*`\-\[\]]/g, '').replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').trim().slice(0, 140);
+  const preview = body.replace(/<[^>]+>/g, ' ').replace(/\]\([^)]*\)/g, '').replace(/[#>*`~\[\]]|^- |\n- /g, ' ').replace(/\s+/g, ' ').trim().slice(0, 140);
   upsertListEntry({ id: pg.id, ...res.meta, preview });
   saving--;
   if (!saving) setSaveText('저장됨');
@@ -371,7 +378,7 @@ function renderGit() {
     h('span', { class: `git-dot ${dirty ? 'dirty' : ''}` }),
     h('span', { class: 'git-text' },
       dirty ? `커밋 안 한 변경 ${gitInfo.changes}개` : '모두 커밋됨',
-      h('div', { class: 'git-sub' }, gitInfo.last ? `마지막 커밋 ${gitInfo.last}` : '아직 커밋 없음')),
+      h('div', { class: 'git-sub' }, gitInfo.last ? `마지막 커밋 ${ago(gitInfo.last)}` : '아직 커밋 없음')),
     btn));
 }
 function openCommitPop(anchor) {
@@ -437,12 +444,15 @@ function emojiPicker(anchor, onPick, allowRemove) {
 }
 
 // ---------- 페이지 생성/삭제 ----------
-async function createPage({ parent = null, title = '', status = 'spark', body = '', go = true } = {}) {
+async function createPage({ parent = null, title = '', status = 'spark', body = '', tags = [], go = true, top = false } = {}) {
   const id = newPageId();
-  const siblings = childrenOf(parent);
-  const order = siblings.length ? Math.max(...siblings.map((s) => s.order ?? 0)) + 1 : 1;
-  const res = await api.save(id, { title, status, parent, order, tags: [] }, body);
-  upsertListEntry({ id, ...res.meta, preview: '' });
+  const orders = state.pages.map((s) => s.order ?? 0);
+  // 보드에서 바로 적은 카드는 맨 위로, 나머지는 맨 아래로
+  const order = !orders.length ? 1 : top ? Math.min(...orders) - 1 : Math.max(...orders) + 1;
+  const meta = { title, status, parent, order, tags };
+  upsertListEntry({ id, ...meta, created: new Date().toISOString(), preview: '' });
+  const res = await api.save(id, meta, body);
+  upsertListEntry({ id, ...res.meta });
   if (parent) { state.expanded[parent] = true; store.set('expanded', state.expanded); }
   if (go) location.hash = `#/p/${id}`;
   else renderTree();
@@ -791,7 +801,11 @@ function createEditor(root, doc, onChange) {
       syncFromDom(b);
       if (b.type !== 'code' && !e.isComposing) {
         if (markdownShortcut(el, b, e)) return;
-        if (e.inputType === 'insertText' && e.data === '/') openSlash(b.id, caretOffset(el) - 1);
+        if (e.inputType === 'insertText' && e.data && e.data.includes('/')) {
+          const start = caretOffset(el) - e.data.length + e.data.lastIndexOf('/');
+          const before = el.textContent[start - 1];
+          if (!before || /\s/.test(before)) openSlash(b.id, start);
+        }
       }
       if (slash && slash.id === b.id) updateSlash(el);
       change();
@@ -817,14 +831,17 @@ function createEditor(root, doc, onChange) {
       render(); focus(nb.id); change();
       return true;
     }
-    if (e.inputType !== 'insertText' || e.data !== ' ' || b.type === 'code') return false;
+    if (e.inputType !== 'insertText' || !e.data || !e.data.includes(' ') || b.type === 'code') return false;
     const off = caretOffset(el);
-    const prefix = plain.slice(0, off).replace(/ /g, ' ');
-    const map = { '# ': 'h1', '## ': 'h2', '### ': 'h3', '- ': 'ul', '* ': 'ul', '+ ': 'ul', '1. ': 'ol', '[] ': 'todo', '[ ] ': 'todo', '> ': 'quote', '" ': 'quote', '``` ': 'code', '! ': 'callout', '>> ': 'toggle' };
-    const type = map[prefix];
+    const insertedFrom = off - e.data.length;
+    const head = plain.replace(/ /g, ' ');
+    const map = { '### ': 'h3', '## ': 'h2', '# ': 'h1', '- ': 'ul', '* ': 'ul', '+ ': 'ul', '1. ': 'ol', '[] ': 'todo', '[ ] ': 'todo', '>> ': 'toggle', '> ': 'quote', '" ': 'quote', '``` ': 'code', '! ': 'callout' };
+    // 방금 입력한 글자가 접두어 끝의 스페이스를 만든 경우만 바꾼다
+    const prefix = Object.keys(map).find((k) => head.startsWith(k) && insertedFrom < k.length && off >= k.length);
+    const type = prefix && map[prefix];
     if (!type || b.type === type) return false;
     if (b.type !== 'p' && !(b.type === 'quote' && type === 'toggle')) return false;
-    const r = rangeAt(el, 0, off);
+    const r = rangeAt(el, 0, prefix.length);
     r.deleteContents();
     syncFromDom(b);
     b.type = type;
@@ -1114,19 +1131,16 @@ function renderBoard() {
   const allTags = [...new Set(state.pages.flatMap((p) => p.tags || []))].sort();
   const visible = state.pages.filter((p) => !state.tagFilter || (p.tags || []).includes(state.tagFilter));
 
-  const input = h('input', { placeholder: '떠오르는 걸 그냥 적고 Enter — 카드가 바로 생겨요', autocomplete: 'off' });
+  const input = h('input', { placeholder: '떠오르는 걸 적고 Enter', autocomplete: 'off' });
   input.addEventListener('keydown', async (e) => {
     if (e.isComposing || e.keyCode === 229) return;
     if (e.key !== 'Enter' || !input.value.trim()) return;
     const title = input.value.trim();
     input.value = '';
-    await createPage({ title, status: 'spark', go: false });
-    if (state.tagFilter) {
-      const id = state.pages[state.pages.length - 1].id;
-      await saveMeta(id, { tags: [state.tagFilter] });
-    }
+    const p = createPage({ title, status: 'spark', tags: state.tagFilter ? [state.tagFilter] : [], go: false, top: true });
     renderBoard();
     $('.capture input').focus();
+    await p;
   });
 
   const page = h('div', { class: 'board-page' },
