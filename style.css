@@ -518,3 +518,16 @@ button.star:hover { opacity: 1; }
   .hide-sm { display: none; }
   .folder-bar .btn { font-size: 12.5px; padding: 4px 8px; }
 }
+
+/* ---------- 메인 보드 폴더 줄 ---------- */
+.board-groups { display: flex; flex-direction: column; gap: 18px; }
+.group-head { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; min-height: 32px; flex-wrap: wrap; }
+.group-toggle { display: inline-flex; align-items: center; gap: 6px; padding: 4px 8px 4px 4px; border-radius: 6px; font-size: 15px; font-weight: 600; }
+.group-toggle:hover { background: var(--hover); }
+.group-toggle .caret { width: 18px; font-size: 10px; color: var(--text-3); transition: transform .12s; display: inline-block; text-align: center; }
+.group-toggle.open .caret { transform: rotate(90deg); }
+.group-toggle .count { color: var(--text-3); font-weight: 400; font-size: 13px; }
+.group-mini { display: flex; gap: 10px; font-size: 13px; color: var(--text-2); }
+.group-open { font-size: 13px; color: var(--text-3); text-decoration: none; padding: 2px 6px; border-radius: 4px; }
+.group-open:hover { background: var(--hover); color: var(--text); }
+.group.closed { border-bottom: 1px solid var(--border); padding-bottom: 6px; }

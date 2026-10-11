@@ -440,6 +440,12 @@ const inFolder = (p) => {
   while (cur && cur.parent && !seen.has(cur.id)) { seen.add(cur.id); cur = byId(cur.parent); if (isFolder(cur)) return true; }
   return false;
 };
+const folderOf = (p) => {
+  const seen = new Set();
+  let cur = p;
+  while (cur && cur.parent && !seen.has(cur.id)) { seen.add(cur.id); cur = byId(cur.parent); if (isFolder(cur)) return cur; }
+  return null;
+};
 // 지금 화면(보드·폴더)을 다시 그리는 함수 — 카드 상태를 바꾸면 이걸 부른다
 let refreshView = () => {};
 const childrenOf = (id) => state.pages
@@ -1732,7 +1738,7 @@ function renderRetro(period) {
 }
 
 // ---------- 보드 칸 (메인 보드·폴더 공용) ----------
-function boardColumns(pages, { parent = null }) {
+function boardColumns(pages, { parent = null, group } = {}) {
   const cols = h('div', { class: 'columns' });
   for (const s of STATUSES) {
     const items = pages.filter((p) => (p.status || 'spark') === s.key)
@@ -1740,12 +1746,64 @@ function boardColumns(pages, { parent = null }) {
     const col = h('div', { class: 'col', 'data-status': s.key },
       h('div', { class: 'col-head' }, statusPill(s.key), h('span', { class: 'count' }, String(items.length)),
         h('button', { class: 'icon-btn sm add', title: '새 카드', onclick: () => createPage({ status: s.key, parent }) }, '＋')));
-    if (!items.length) col.append(h('div', { class: 'col-empty' }, s.key === 'spark' ? '위 입력칸에 아무거나 적어보세요' : TOUCH ? '아직 없어요' : '카드를 여기로 끌어오세요'));
+    if (!items.length) col.append(h('div', { class: 'col-empty' }, s.key === 'spark' && group === undefined ? '위 입력칸에 아무거나 적어보세요' : TOUCH ? '아직 없어요' : '카드를 여기로 끌어오세요'));
     items.forEach((p) => col.append(boardCard(p)));
-    bindColumnDrop(col, s.key);
+    bindColumnDrop(col, s.key, group);
     cols.append(col);
   }
   return cols;
+}
+
+// 메인 보드를 「폴더 밖」 + 폴더별 줄로 나눈다 (노션 하위 그룹처럼). 접힘 상태는 이 브라우저에 기억
+const collapsed = store.get('board-collapsed', {});
+const groupKey = (fid) => fid || 'root';
+function boardGroupList(pages) {
+  const groups = new Map([[null, []]]);
+  for (const p of pages) {
+    const f = folderOf(p)?.id || null;
+    if (!groups.has(f)) groups.set(f, []);
+    groups.get(f).push(p);
+  }
+  const folders = [...groups.keys()].filter(Boolean).map(byId)
+    .sort((a, b) => (a.order ?? 0) - (b.order ?? 0) || String(a.created).localeCompare(String(b.created)));
+  return [{ folder: null, pages: groups.get(null) }, ...folders.map((f) => ({ folder: f, pages: groups.get(f.id) }))];
+}
+function folderGroupsToggle(pages) {
+  const groups = boardGroupList(pages);
+  if (groups.length < 2) return null;
+  const allClosed = groups.every((g) => collapsed[groupKey(g.folder?.id)]);
+  return h('button', { class: 'btn ghost', onclick: () => {
+    groups.forEach((g) => { collapsed[groupKey(g.folder?.id)] = !allClosed; });
+    store.set('board-collapsed', collapsed);
+    renderBoard();
+  } }, allClosed ? '⊞ 모두 펼치기' : '⊟ 모두 접기');
+}
+function boardGroups(pages) {
+  const groups = boardGroupList(pages);
+  // 폴더가 하나도 없으면 예전처럼 칸만
+  if (groups.length < 2) return boardColumns(pages, {});
+  const wrap = h('div', { class: 'board-groups' });
+  for (const { folder, pages: list } of groups) {
+    const key = groupKey(folder?.id);
+    const closed = !!collapsed[key];
+    const counts = STATUSES.map((s) => list.filter((p) => (p.status || 'spark') === s.key).length);
+    const head = h('div', { class: 'group-head' },
+      h('button', { class: `group-toggle ${closed ? '' : 'open'}`, 'aria-expanded': String(!closed), onclick: () => {
+        collapsed[key] = !closed;
+        store.set('board-collapsed', collapsed);
+        renderBoard();
+      } },
+        h('span', { class: 'caret' }, '▶'),
+        h('span', {}, folder ? (folder.icon || '📁') : '📄'),
+        h('span', { class: 'group-name' }, folder ? (folder.title || '제목 없는 폴더') : '폴더 밖'),
+        h('span', { class: 'count' }, String(list.length))),
+      closed ? h('span', { class: 'group-mini' }, STATUSES.map((s, i) => counts[i] ? h('span', {}, `${s.icon} ${counts[i]}`) : null)) : null,
+      h('span', { style: 'flex:1' }),
+      folder ? h('a', { class: 'group-open', href: `#/p/${folder.id}` }, '폴더 열기 →') : null);
+    wrap.append(h('section', { class: `group ${closed ? 'closed' : ''}` }, head,
+      closed ? null : boardColumns(list, { parent: folder?.id || null, group: folder?.id || null })));
+  }
+  return wrap;
 }
 
 // ---------- 폴더 (노션 데이터베이스처럼 하위 문서를 보드·갤러리·목록으로) ----------
@@ -1846,7 +1904,7 @@ function renderBoard() {
   view.innerHTML = '';
 
   refreshView = renderBoard;
-  const boardPages = state.pages.filter((p) => !isRetro(p) && !isFolder(p) && !inFolder(p));
+  const boardPages = state.pages.filter((p) => !isRetro(p) && !isFolder(p));
   const allTags = [...new Set(boardPages.flatMap((p) => p.tags || []))].sort();
   const visible = boardPages.filter((p) => !state.tagFilter || (p.tags || []).includes(state.tagFilter));
 
@@ -1874,12 +1932,12 @@ function renderBoard() {
       h('button', { class: `chip ${!state.tagFilter ? 'on' : ''}`, onclick: () => { state.tagFilter = null; renderBoard(); } }, '전체'),
       allTags.map((t) => h('button', { class: `chip ${state.tagFilter === t ? 'on' : ''}`, onclick: () => { state.tagFilter = state.tagFilter === t ? null : t; renderBoard(); } }, `# ${t}`)),
       h('span', { class: 'spacer' }),
+      folderGroupsToggle(visible),
       h('button', { class: 'btn ghost', onclick: openShuffle }, '🎲 섞어보기'),
     ),
   );
 
-  const cols = boardColumns(visible, {});
-  page.append(cols);
+  page.append(boardGroups(visible));
   view.append(page);
 }
 
@@ -1912,7 +1970,8 @@ function boardCard(p, opts = {}) {
   return card;
 }
 
-function bindColumnDrop(col, statusKey) {
+// group: 메인 보드의 폴더 줄 (undefined 면 폴더 구분 없음, null 이면 「폴더 밖」)
+function bindColumnDrop(col, statusKey, group) {
   col.addEventListener('dragover', (e) => { if (e.dataTransfer.types.includes('text/x-card')) { e.preventDefault(); col.classList.add('over'); } });
   col.addEventListener('dragleave', (e) => { if (!col.contains(e.relatedTarget)) col.classList.remove('over'); });
   col.addEventListener('drop', async (e) => {
@@ -1931,9 +1990,13 @@ function bindColumnDrop(col, statusKey) {
       order = i === 0 ? orderOf(after) - 1 : (orderOf(cards[i - 1]) + orderOf(after)) / 2;
     }
     const p = byId(id);
-    Object.assign(p, { status: statusKey, order });
+    const patch = { status: statusKey, order };
+    if (group !== undefined && (folderOf(p)?.id || null) !== group) patch.parent = group;
+    Object.assign(p, patch);
+    if (patch.parent) { state.expanded[patch.parent] = true; store.set('expanded', state.expanded); }
     refreshView();
-    await saveMeta(id, { status: statusKey, order });
+    if (patch.parent !== undefined) renderTree();
+    await saveMeta(id, patch);
   });
 }
 
