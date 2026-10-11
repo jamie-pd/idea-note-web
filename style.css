@@ -458,3 +458,23 @@ button.star:hover { opacity: 1; }
   .icon-btn.sm { width: 28px; height: 28px; }
   .si-actions { display: flex; }
 }
+
+/* ---------- 들여쓰기 ---------- */
+.blk { padding-left: calc(48px + var(--ind, 0) * 26px); }
+.blk-handle { left: calc(var(--ind, 0) * 26px); }
+.blk.drop-before::before, .blk.drop-after::after { left: calc(48px + var(--ind, 0) * 26px); }
+.mk-bullet::before { content: none; }
+.mk-bullet { font-size: 18px; line-height: 24px; }
+.toggle-empty { display: block; color: var(--text-3); font-size: 14.5px; padding: 3px 2px; text-align: left; border-radius: 4px; }
+.toggle-empty:hover { background: var(--hover); }
+#mobile-bar {
+  position: fixed; left: 0; right: 0; top: 0; z-index: 80; display: flex; gap: 4px; padding: 6px 10px;
+  background: var(--pop); border-top: 1px solid var(--border); box-shadow: 0 -2px 8px rgba(0, 0, 0, 0.06);
+}
+#mobile-bar button { min-width: 44px; height: 36px; border-radius: 8px; font-size: 18px; color: var(--text); }
+#mobile-bar button:active { background: var(--active); }
+#mobile-bar button[data-act="done"] { font-size: 15px; font-weight: 600; color: var(--accent); }
+@media (max-width: 760px) {
+  .blk { padding-left: calc(var(--ind, 0) * 22px); }
+  .page { padding-bottom: 60vh; }
+}

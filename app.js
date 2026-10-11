@@ -287,46 +287,71 @@ function htmlToMd(root) {
 const plainLen = (md) => { const d = document.createElement('div'); d.innerHTML = mdToHtml(md); return d.textContent.length; };
 
 // ---------- 블록 <-> 마크다운 파일 ----------
+// 같은 깊이에서 이어지는 번호 목록 번호 매기기 — [깊이별 번호]
+function listNumbers(blocks) {
+  const last = [], count = [];
+  return blocks.map((b) => {
+    const L = b.indent || 0;
+    last.length = L + 1; count.length = L + 1;
+    const n = b.type === 'ol' ? (last[L] === 'ol' ? count[L] + 1 : 1) : 0;
+    last[L] = b.type; count[L] = n;
+    return n;
+  });
+}
+const INDENT = '    ';
 function blocksToMd(blocks) {
   const parts = [];
-  let num = 0;
+  const nums = listNumbers(blocks);
   blocks.forEach((b, i) => {
     const prev = blocks[i - 1];
-    num = b.type === 'ol' ? (prev && prev.type === 'ol' ? num + 1 : 1) : 0;
+    const pad = INDENT.repeat(b.indent || 0);
     let s;
     switch (b.type) {
       case 'h1': s = `# ${b.text}`; break;
       case 'h2': s = `## ${b.text}`; break;
       case 'h3': s = `### ${b.text}`; break;
       case 'ul': s = `- ${b.text}`; break;
-      case 'ol': s = `${num}. ${b.text}`; break;
+      case 'ol': s = `${nums[i]}. ${b.text}`; break;
       case 'todo': s = `- [${b.checked ? 'x' : ' '}] ${b.text}`; break;
       case 'quote': s = `> ${b.text}`; break;
       case 'callout': s = `<aside>${b.icon || '💡'} ${b.text}</aside>`; break;
       case 'toggle': s = `<details><summary>${b.text}</summary>${b.body || ''}</details>`; break;
       case 'divider': s = '---'; break;
-      case 'code': s = '```' + (b.lang || '') + '\n' + b.text + '\n```'; break;
+      case 'code': s = ['```' + (b.lang || ''), ...b.text.split('\n'), '```'].join('\n' + pad); break;
       default: s = b.text ? b.text : '<br>';
     }
-    const tight = prev && LIST_TYPES.has(b.type) && LIST_TYPES.has(prev.type);
-    parts.push((parts.length ? (tight ? '\n' : '\n\n') : '') + s);
+    // 목록끼리, 그리고 하위 블록은 붙여 쓴다
+    const tight = prev && ((LIST_TYPES.has(b.type) && LIST_TYPES.has(prev.type)) || (b.indent || 0) > 0);
+    parts.push((parts.length ? (tight ? '\n' : '\n\n') : '') + pad + s);
   });
   // 끝의 빈 문단은 저장하지 않는다
   return parts.join('').replace(/(\n\n<br>)+$/, '');
 }
 
 function mdToBlocks(md) {
-  const lines = (md || '').replace(/\r/g, '').split('\n');
+  const lines = (md || '').replace(/\r/g, '').replace(/\t/g, INDENT).split('\n');
   const blocks = [];
-  const mk = (type, text = '', extra = {}) => blocks.push({ id: uid(), type, text, ...extra });
+  // 들여쓰기 폭이 2칸이든 4칸이든 앞 줄보다 깊으면 한 단계 안쪽으로 본다
+  const widths = [0];
+  let indent = 0, base = -1;
+  const mk = (type, text = '', extra = {}) => blocks.push({ id: uid(), type, text, indent, ...extra });
   for (let i = 0; i < lines.length; i++) {
-    const line = lines[i];
+    const raw = lines[i];
+    if (!raw.trim()) continue;
+    const spaces = raw.match(/^ */)[0].length;
+    if (base < 0) base = spaces; // 붙여넣은 조각이 통째로 들여써져 있어도 첫 줄을 0단계로
+    const w = Math.max(0, spaces - base);
+    while (widths.length > 1 && widths[widths.length - 1] > w) widths.pop();
+    if (w > widths[widths.length - 1]) widths.push(w);
+    const prevInd = blocks.length ? blocks[blocks.length - 1].indent : -1;
+    indent = Math.min(widths.length - 1, prevInd + 1);
+    if (indent < widths.length - 1) { widths.length = indent + 1; if (indent > 0) widths[indent] = w; }
+    const line = raw.slice(spaces);
     let m;
-    if (!line.trim()) continue;
     if ((m = line.match(/^```(.*)$/))) {
       const buf = [];
       i++;
-      while (i < lines.length && !/^```\s*$/.test(lines[i])) buf.push(lines[i++]);
+      while (i < lines.length && !/^\s*```\s*$/.test(lines[i])) buf.push(lines[i++].replace(new RegExp(`^ {0,${spaces}}`), ''));
       mk('code', buf.join('\n'), { lang: m[1].trim() });
       continue;
     }
@@ -342,6 +367,12 @@ function mdToBlocks(md) {
   }
   return blocks;
 }
+
+// 깊이별 표시 — 노션처럼 • ◦ ▪ / 1. a. i.
+const BULLETS = ['•', '◦', '▪'];
+const toAlpha = (n) => { let s = ''; while (n > 0) { n--; s = String.fromCharCode(97 + (n % 26)) + s; n = Math.floor(n / 26); } return s; };
+const toRoman = (n) => [[10, 'x'], [9, 'ix'], [5, 'v'], [4, 'iv'], [1, 'i']].reduce((s, [v, r]) => { while (n >= v) { s += r; n -= v; } return s; }, '');
+const numLabel = (n, depth) => (depth % 3 === 1 ? toAlpha(n) : depth % 3 === 2 ? toRoman(n) : String(n)) + '.';
 
 // ---------- 캐럿 ----------
 function caretOffset(el) {
@@ -823,13 +854,84 @@ function createEditor(root, doc, onChange) {
 
   const change = () => onChange();
 
+  const ind = (b) => b.indent || 0;
+  // i 번째 블록과 그 하위 블록들의 끝(다음 형제 위치)
+  const subtreeEnd = (i) => { let j = i + 1; while (j < blocks.length && ind(blocks[j]) > ind(blocks[i])) j++; return j; };
+  const hasChildren = (i) => i + 1 < blocks.length && ind(blocks[i + 1]) > ind(blocks[i]);
+  let hidden = new Set();
+  const visIdx = (i, dir) => { let j = i + dir; while (j >= 0 && j < blocks.length && hidden.has(blocks[j].id)) j += dir; return blocks[j] ? j : -1; };
+
   function render() {
     root.innerHTML = '';
-    let num = 0;
+    hidden = new Set();
+    const nums = listNumbers(blocks);
+    let hideBelow = Infinity; // 접힌 토글 아래 깊이
     blocks.forEach((b, i) => {
-      num = b.type === 'ol' ? (blocks[i - 1]?.type === 'ol' ? num + 1 : 1) : 0;
-      root.append(renderBlock(b, num));
+      if (ind(b) > hideBelow) { hidden.add(b.id); return; }
+      hideBelow = Infinity;
+      if (b.type === 'toggle') {
+        if (b.open === undefined) b.open = !b.body && !hasChildren(i);
+        if (!b.open) hideBelow = ind(b);
+      }
+      root.append(renderBlock(b, nums[i], i));
     });
+  }
+
+  // Tab / Shift+Tab — 하위 블록도 같이 움직인다
+  function indentBlock(id, d) {
+    const i = idx(id);
+    const b = blocks[i];
+    if (!b) return false;
+    const end = subtreeEnd(i);
+    if (d > 0) {
+      const p = visIdx(i, -1);
+      if (p < 0 || ind(b) + 1 > ind(blocks[p]) + 1) return false;
+      if (blocks[p].type === 'toggle') blocks[p].open = true;
+    } else if (!ind(b)) return false;
+    for (let k = i; k < end; k++) blocks[k].indent = Math.max(0, ind(blocks[k]) + d);
+    return true;
+  }
+  function indentAndKeepCaret(b, el, d) {
+    syncFromDom(b);
+    const off = caretOffset(el);
+    if (!indentBlock(b.id, d)) return;
+    render();
+    focus(b.id, off < 0 ? 'end' : off);
+    change();
+  }
+  // ⌘⇧↑↓ — 같은 깊이의 앞뒤 형제와 자리 바꾸기
+  function moveBlock(b, el, dir) {
+    syncFromDom(b);
+    const off = caretOffset(el);
+    const i = idx(b.id), end = subtreeEnd(i), L = ind(b);
+    if (dir < 0) {
+      let j = i - 1;
+      while (j >= 0 && ind(blocks[j]) > L) j--;
+      if (j < 0 || ind(blocks[j]) < L) return;
+      const mine = blocks.splice(i, end - i);
+      blocks.splice(j, 0, ...mine);
+    } else {
+      if (end >= blocks.length || ind(blocks[end]) !== L) return;
+      const nextEnd = subtreeEnd(end);
+      const theirs = blocks.splice(end, nextEnd - end);
+      blocks.splice(i, 0, ...theirs);
+    }
+    render(); focus(b.id, off < 0 ? 'end' : off); change();
+  }
+  function duplicateBlock(b) {
+    syncFromDom(b);
+    const i = idx(b.id), end = subtreeEnd(i);
+    const copy = blocks.slice(i, end).map((x) => ({ ...x, id: uid() }));
+    blocks.splice(end, 0, ...copy);
+    render(); focus(copy[0].id); change();
+  }
+  function deleteBlock(b) {
+    const i = idx(b.id);
+    blocks.splice(i, subtreeEnd(i) - i);
+    render();
+    const n = blocks[Math.min(i, blocks.length) - 1] || blocks[i];
+    if (n) focus(n.id, 'end');
+    change();
   }
 
   function focus(id, pos = 'end') {
@@ -840,6 +942,7 @@ function createEditor(root, doc, onChange) {
 
   function insertAfter(id, block) {
     const i = id ? idx(id) : blocks.length - 1;
+    if (block.indent === undefined) block.indent = blocks[i] ? ind(blocks[i]) : 0;
     blocks.splice(i + 1, 0, block);
     return block;
   }
@@ -850,8 +953,8 @@ function createEditor(root, doc, onChange) {
     b.text = b.type === 'code' ? el.textContent : htmlToMd(el);
   }
 
-  function renderBlock(b, num) {
-    const row = h('div', { class: `blk ${b.type === 'todo' && b.checked ? 'done' : ''}`, 'data-id': b.id, 'data-type': b.type });
+  function renderBlock(b, num, i) {
+    const row = h('div', { class: `blk ${b.type === 'todo' && b.checked ? 'done' : ''}`, 'data-id': b.id, 'data-type': b.type, style: `--ind:${ind(b)}` });
     // 핸들
     const addBtn = h('button', { class: 'add', title: '아래에 블록 추가', onclick: () => {
       const nb = insertAfter(b.id, { id: uid(), type: 'p', text: '/' });
@@ -886,7 +989,7 @@ function createEditor(root, doc, onChange) {
           change();
         } else if (e.key === 'ArrowUp' || e.key === 'ArrowDown') {
           e.preventDefault();
-          const n = blocks[idx(b.id) + (e.key === 'ArrowUp' ? -1 : 1)];
+          const n = blocks[visIdx(idx(b.id), e.key === 'ArrowUp' ? -1 : 1)];
           if (n) focus(n.id, e.key === 'ArrowUp' ? 'end' : 'start');
         }
       });
@@ -894,8 +997,8 @@ function createEditor(root, doc, onChange) {
     }
 
     // 앞 표시
-    if (b.type === 'ul') body.append(h('span', { class: 'mk mk-bullet' }));
-    if (b.type === 'ol') body.append(h('span', { class: 'mk mk-num' }, `${num}.`));
+    if (b.type === 'ul') body.append(h('span', { class: 'mk mk-bullet' }, BULLETS[ind(b) % 3]));
+    if (b.type === 'ol') body.append(h('span', { class: 'mk mk-num' }, numLabel(num, ind(b))));
     if (b.type === 'todo') {
       body.append(h('span', { class: `mk-check ${b.checked ? 'on' : ''}`, role: 'checkbox', 'aria-checked': String(!!b.checked), onclick: () => {
         b.checked = !b.checked;
@@ -923,10 +1026,9 @@ function createEditor(root, doc, onChange) {
     bindText(text, b);
 
     if (b.type === 'toggle') {
-      if (b.open === undefined) b.open = !b.body;
       const arrow = h('span', { class: `mk-toggle ${b.open ? 'open' : ''}`, onclick: () => { b.open = !b.open; render(); } }, '▶');
       const wrap = h('div', { class: 'toggle-wrap' }, text);
-      if (b.open) {
+      if (b.open && b.body) {
         const tb = h('div', { class: 'blk-text', contenteditable: 'true', spellcheck: 'false', 'data-ph': '빈 토글이에요. 내용을 적어보세요' });
         tb.innerHTML = mdToHtml(b.body || '');
         tb.addEventListener('input', () => { if (tb.innerHTML === '<br>') tb.innerHTML = ''; b.body = htmlToMd(tb); change(); });
@@ -942,6 +1044,11 @@ function createEditor(root, doc, onChange) {
         });
         tb.addEventListener('paste', pastePlain);
         wrap.append(h('div', { class: 'toggle-body' }, tb));
+      } else if (b.open && !hasChildren(i)) {
+        wrap.append(h('button', { class: 'toggle-empty', onclick: () => {
+          const nb = insertAfter(b.id, { id: uid(), type: 'p', text: '', indent: ind(b) + 1 });
+          render(); focus(nb.id); change();
+        } }, '빈 토글이에요. 눌러서 안에 블록을 추가하세요'));
       }
       body.append(arrow, wrap);
     } else {
@@ -964,9 +1071,15 @@ function createEditor(root, doc, onChange) {
       if (!from) return;
       e.preventDefault();
       const before = row.classList.contains('drop-before');
-      if (from === b.id) return;
-      const [moved] = blocks.splice(idx(from), 1);
-      blocks.splice(idx(b.id) + (before ? 0 : 1), 0, moved);
+      const fi = idx(from);
+      const fend = subtreeEnd(fi);
+      const ti = idx(b.id);
+      if (ti >= fi && ti < fend) return; // 자기 안으로는 못 옮긴다
+      const moved = blocks.splice(fi, fend - fi);
+      const delta = ind(b) - ind(moved[0]);
+      moved.forEach((x) => { x.indent = Math.max(0, ind(x) + delta); });
+      const t = idx(b.id);
+      blocks.splice(before ? t : subtreeEnd(t), 0, ...moved);
       render();
       change();
     });
@@ -1054,6 +1167,15 @@ function createEditor(root, doc, onChange) {
     if (mod && e.key.toLowerCase() === 'e') { e.preventDefault(); formatCode(); return; }
     if (mod && e.key.toLowerCase() === 'k') { e.preventDefault(); formatLink(); return; }
     if (mod && e.key === 'Enter' && b.type === 'todo') { e.preventDefault(); $('.mk-check', rowEl(b.id)).click(); return; }
+    if (mod && e.shiftKey && (e.key === 'ArrowUp' || e.key === 'ArrowDown')) { e.preventDefault(); moveBlock(b, el, e.key === 'ArrowUp' ? -1 : 1); return; }
+    if (mod && !e.shiftKey && e.key.toLowerCase() === 'd') { e.preventDefault(); duplicateBlock(b); return; }
+    if (mod && e.altKey && /^Digit[0-8]$/.test(e.code || '')) {
+      e.preventDefault();
+      const type = ['p', 'h1', 'h2', 'h3', 'todo', 'ul', 'ol', 'toggle', 'code'][Number(e.code.slice(5))];
+      syncFromDom(b); b.type = type; render(); focus(b.id); change();
+      return;
+    }
+    if (e.key === 'Tab' && b.type !== 'code') { e.preventDefault(); indentAndKeepCaret(b, el, e.shiftKey ? -1 : 1); return; }
 
     if (b.type === 'code') {
       if (e.key === 'Tab') { e.preventDefault(); document.execCommand('insertText', false, '  '); }
@@ -1070,6 +1192,7 @@ function createEditor(root, doc, onChange) {
     if (e.key === 'Enter') {
       e.preventDefault();
       // 빈 목록에서 Enter → 텍스트로
+      if (!el.textContent && ind(b) > 0 && b.type !== 'toggle') { indentAndKeepCaret(b, el, -1); return; }
       if ((LIST_TYPES.has(b.type) || b.type === 'quote' || b.type === 'toggle' || b.type === 'callout') && !el.textContent) {
         b.type = 'p'; render(); focus(b.id); change(); return;
       }
@@ -1093,8 +1216,11 @@ function createEditor(root, doc, onChange) {
         b.text = tailMd;
         render(); focus(b.id, 'start'); change(); return;
       }
-      nb = insertAfter(b.id, { id: uid(), type: keepType, text: tailMd, ...(keepType === 'todo' ? { checked: false } : {}) });
-      if (b.type === 'toggle' && !b.open) { /* 닫힌 토글 다음엔 일반 블록 */ }
+      const i0 = idx(b.id);
+      const intoChild = (b.type === 'toggle' && b.open) || (b.type !== 'toggle' && hasChildren(i0));
+      nb = { id: uid(), type: keepType, text: tailMd, indent: ind(b) + (intoChild ? 1 : 0), ...(keepType === 'todo' ? { checked: false } : {}) };
+      // 닫힌 토글이면 접힌 내용 뒤에 넣는다
+      blocks.splice(intoChild ? i0 + 1 : b.type === 'toggle' ? subtreeEnd(i0) : i0 + 1, 0, nb);
       render();
       focus(nb.id, 'start');
       change();
@@ -1106,13 +1232,15 @@ function createEditor(root, doc, onChange) {
       if (!sel.isCollapsed || caretOffset(el) !== 0) return;
       e.preventDefault();
       if (b.type !== 'p') { b.type = 'p'; render(); focus(b.id, 'start'); change(); return; }
+      if (ind(b) > 0) { indentAndKeepCaret(b, el, -1); return; }
       const i = idx(b.id);
-      const prev = blocks[i - 1];
+      const pi = visIdx(i, -1);
+      const prev = pi >= 0 ? blocks[pi] : null;
       if (!prev) {
         if (!b.text && blocks.length > 1) { blocks.splice(i, 1); render(); focus(blocks[0].id, 'start'); change(); }
         return;
       }
-      if (prev.type === 'divider') { blocks.splice(i - 1, 1); render(); focus(b.id, 'start'); change(); return; }
+      if (prev.type === 'divider') { blocks.splice(pi, 1); render(); focus(b.id, 'start'); change(); return; }
       if (prev.type === 'code') { if (!b.text) { blocks.splice(i, 1); render(); focus(prev.id, 'end'); change(); } return; }
       const at = plainLen(prev.text);
       prev.text = (prev.text || '') + (b.text || '');
@@ -1137,12 +1265,12 @@ function createEditor(root, doc, onChange) {
     }
 
     if (e.key === 'ArrowUp' && atFirstLine(el)) {
-      const prev = blocks[idx(b.id) - 1];
+      const prev = blocks[visIdx(idx(b.id), -1)];
       if (prev) { e.preventDefault(); focus(prev.id, 'end'); }
       else { e.preventDefault(); const t = $('.page-title'); if (t) setCaret(t, 'end'); }
     }
     if (e.key === 'ArrowDown' && atLastLine(el)) {
-      const next = blocks[idx(b.id) + 1];
+      const next = blocks[visIdx(idx(b.id), 1)];
       if (next) { e.preventDefault(); focus(next.id, 'start'); }
     }
   }
@@ -1154,6 +1282,7 @@ function createEditor(root, doc, onChange) {
     if (b.type === 'code' || !t.includes('\n')) { document.execCommand('insertText', false, t); return; }
     const parsed = mdToBlocks(t);
     if (!parsed.length) return;
+    parsed.forEach((x) => { x.indent = ind(x) + ind(b); });
     const i = idx(b.id);
     if (!b.text && b.type === 'p') blocks.splice(i, 1, ...parsed);
     else blocks.splice(i + 1, 0, ...parsed);
@@ -1171,15 +1300,10 @@ function createEditor(root, doc, onChange) {
       onclick: () => { closePop(); syncFromDom(b); b.type = t.type; render(); focus(b.id); change(); },
     }));
     openPop(anchor, [
-      menuItem({ compact: true, icon: '⧉', label: '복제', onclick: () => { closePop(); syncFromDom(b); const c = { ...b, id: uid() }; insertAfter(b.id, c); render(); focus(c.id); change(); } }),
-      menuItem({ compact: true, icon: '🗑', label: '삭제', danger: true, onclick: () => {
-        closePop();
-        const i = idx(b.id); blocks.splice(i, 1);
-        render();
-        const n = blocks[i - 1] || blocks[i];
-        if (n) focus(n.id, 'end');
-        change();
-      } }),
+      menuItem({ compact: true, icon: '⧉', label: '복제  ⌘D', onclick: () => { closePop(); duplicateBlock(b); } }),
+      menuItem({ compact: true, icon: '⇥', label: '들여쓰기  Tab', onclick: () => { closePop(); syncFromDom(b); if (indentBlock(b.id, 1)) { render(); focus(b.id); change(); } } }),
+      menuItem({ compact: true, icon: '⇤', label: '내어쓰기  ⇧Tab', onclick: () => { closePop(); syncFromDom(b); if (indentBlock(b.id, -1)) { render(); focus(b.id); change(); } } }),
+      menuItem({ compact: true, icon: '🗑', label: '삭제', danger: true, onclick: () => { closePop(); deleteBlock(b); } }),
       h('div', { class: 'pop-sep' }),
       h('div', { class: 'pop-label' }, '전환'),
       ...turn,
@@ -1252,7 +1376,47 @@ function createEditor(root, doc, onChange) {
     change();
   }
 
-  return { render, focus };
+  // 모바일 툴바에서 쓰는 들여쓰기
+  function indentById(id, d) {
+    const b = blocks[idx(id)];
+    const el = textEl(id);
+    if (b && el) indentAndKeepCaret(b, el, d);
+  }
+
+  return { render, focus, indentById };
+}
+
+// ---------- 모바일 편집 툴바 (Tab 키가 없어서) ----------
+if (TOUCH) {
+  const bar = h('div', { id: 'mobile-bar', hidden: true },
+    h('button', { 'data-act': 'out', 'aria-label': '내어쓰기' }, '⇤'),
+    h('button', { 'data-act': 'in', 'aria-label': '들여쓰기' }, '⇥'),
+    h('button', { 'data-act': 'slash', 'aria-label': '블록 고르기' }, '/'),
+    h('span', { style: 'flex:1' }),
+    h('button', { 'data-act': 'done', 'aria-label': '키보드 닫기' }, '완료'));
+  document.body.append(bar);
+  const place = () => {
+    const vv = window.visualViewport;
+    if (vv) bar.style.top = `${vv.offsetTop + vv.height - bar.offsetHeight}px`;
+  };
+  window.visualViewport?.addEventListener('resize', place);
+  window.visualViewport?.addEventListener('scroll', place);
+  const currentText = () => document.activeElement?.closest?.('.blk-text');
+  document.addEventListener('focusin', () => { bar.hidden = !currentText(); place(); });
+  document.addEventListener('focusout', () => setTimeout(() => { bar.hidden = !currentText(); }, 50));
+  bar.addEventListener('mousedown', (e) => e.preventDefault());
+  bar.addEventListener('touchstart', (e) => { if (e.target.closest('button')) e.preventDefault(); }, { passive: false });
+  const act = (btn) => {
+    const el = currentText();
+    if (!el || !editor) return;
+    const id = el.closest('.blk')?.dataset.id;
+    const a = btn.dataset.act;
+    if (a === 'in' || a === 'out') editor.indentById(id, a === 'in' ? 1 : -1);
+    if (a === 'slash') document.execCommand('insertText', false, '/');
+    if (a === 'done') el.blur();
+  };
+  bar.addEventListener('click', (e) => { const btn = e.target.closest('button'); if (btn) act(btn); });
+  bar.addEventListener('touchend', (e) => { const btn = e.target.closest('button'); if (btn) { e.preventDefault(); act(btn); } });
 }
 
 // ---------- 서식 툴바 ----------
