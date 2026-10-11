@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>아이디어 노트</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>💡</text></svg>">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/variable/pretendardvariable-dynamic-subset.min.css">
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <div id="app">
+    <aside id="sidebar">
+      <div class="side-head">
+        <div class="ws"><span class="ws-icon">💡</span><span class="ws-name">아이디어 노트</span></div>
+        <button class="icon-btn only-mobile" id="side-close" aria-label="사이드바 닫기">✕</button>
+      </div>
+      <div class="side-search"><input id="search" type="search" placeholder="검색" autocomplete="off"></div>
+      <nav class="side-nav">
+        <a class="side-item" href="#/board" data-route="board"><span class="si-icon">📋</span><span class="si-title">아이디어 보드</span></a>
+      </nav>
+      <div class="side-section">
+        <div class="side-label"><span>페이지</span><button class="icon-btn sm" id="add-root" title="새 페이지">＋</button></div>
+        <div id="tree"></div>
+      </div>
+      <button class="side-new" id="add-root-2">＋ 새 페이지</button>
+      <div class="side-foot" id="gitbar"></div>
+    </aside>
+    <div id="scrim"></div>
+    <main id="main">
+      <header id="topbar">
+        <button class="icon-btn only-mobile" id="side-open" aria-label="메뉴">☰</button>
+        <div id="crumbs"></div>
+        <div class="top-right">
+          <span id="save-state"></span>
+          <button class="icon-btn" id="page-more" aria-label="더보기" hidden>···</button>
+        </div>
+      </header>
+      <div id="view"></div>
+    </main>
+  </div>
+  <div id="popover-layer"></div>
+  <div id="fmt-bar" hidden>
+    <button data-fmt="bold" title="굵게 (⌘B)"><b>B</b></button>
+    <button data-fmt="italic" title="기울임 (⌘I)"><i>i</i></button>
+    <button data-fmt="strikeThrough" title="취소선"><s>S</s></button>
+    <button data-fmt="code" title="코드 (⌘E)"><code>&lt;/&gt;</code></button>
+    <button data-fmt="link" title="링크 (⌘K)">🔗</button>
+  </div>
+  <script src="/app.js"></script>
+</body>
+</html>
