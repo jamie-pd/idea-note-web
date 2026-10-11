@@ -438,3 +438,23 @@ button.star:hover { opacity: 1; }
   .retro-open { flex-direction: column; align-items: stretch; }
   .retro-open-right { justify-content: space-between; }
 }
+
+/* ---------- 터치 · 모바일 ---------- */
+.card { position: relative; }
+.card-status {
+  position: absolute; top: 6px; right: 6px; width: 28px; height: 28px; border-radius: 6px;
+  display: none; place-items: center; color: var(--text-3); font-size: 15px; background: var(--card);
+}
+.card:hover .card-status { display: grid; }
+.card-status:hover { background: var(--hover); color: var(--text); }
+@media (hover: none) {
+  .card-status { display: grid; }
+  .card .card-title { padding-right: 28px; }
+}
+@media (max-width: 760px) {
+  /* iOS 는 16px 보다 작은 입력칸을 누르면 화면을 확대해서 */
+  input, .pop-input, .tag-input, .side-search input, .capture input { font-size: 16px; }
+  .side-item { min-height: 36px; }
+  .icon-btn.sm { width: 28px; height: 28px; }
+  .si-actions { display: flex; }
+}

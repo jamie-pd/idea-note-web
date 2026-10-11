@@ -32,6 +32,7 @@ const BLOCK_TYPES = [
 ];
 const PLACEHOLDER = { p: "글을 쓰거나 '/'로 블록을 골라요", h1: '제목 1', h2: '제목 2', h3: '제목 3', ul: '목록', ol: '목록', todo: '할 일', toggle: '토글', quote: '인용', callout: '메모', code: '' };
 const LIST_TYPES = new Set(['ul', 'ol', 'todo']);
+const TOUCH = matchMedia('(hover: none)').matches;
 
 const EMOJIS = '💡 🌱 ✅ 💤 🔥 ✨ 🚀 🎯 🧠 📌 📝 📋 🗂️ 🧩 🎨 🎮 📱 💬 💰 ⭐ 🎁 📈 🧪 🔍 ⚡ 🌈 🍀 🐣 🤔 ❓ ❗ 🗺️ 🏁 🛠️ 🪄 🎬 📣 🧲 🌙 ☕'.split(' ');
 
@@ -683,15 +684,16 @@ async function openPage(id) {
     renderTree();
     renderCrumbs();
   });
+  const toFirstBlock = () => {
+    if (!state.page.blocks.length) state.page.blocks.push({ id: uid(), type: 'p', text: '' });
+    editor.render();
+    editor.focus(state.page.blocks[0].id, 'start');
+  };
   title.addEventListener('keydown', (e) => {
     if (e.isComposing || e.keyCode === 229) return;
-    if (e.key === 'Enter' || (e.key === 'ArrowDown' && atLastLine(title))) {
-      e.preventDefault();
-      if (!state.page.blocks.length) state.page.blocks.push({ id: uid(), type: 'p', text: '' });
-      editor.render();
-      editor.focus(state.page.blocks[0].id, 'start');
-    }
+    if (e.key === 'Enter' || (e.key === 'ArrowDown' && atLastLine(title))) { e.preventDefault(); toFirstBlock(); }
   });
+  title.addEventListener('beforeinput', (e) => { if (e.inputType === 'insertParagraph' || e.inputType === 'insertLineBreak') { e.preventDefault(); toFirstBlock(); } });
   title.addEventListener('paste', (e) => { e.preventDefault(); document.execCommand('insertText', false, e.clipboardData.getData('text/plain').replace(/\n/g, ' ')); });
 
   page.append(iconWrap, title, renderProps(meta));
@@ -765,11 +767,20 @@ function renderProps(meta) {
       tagsV.append(h('span', { class: 'tag', style: `background:var(--c-${c});color:var(--c-${c}-t)` }, t,
         h('span', { class: 'x', onclick: () => { meta.tags = meta.tags.filter((x) => x !== t); drawTags(); savePage(); } }, '✕')));
     });
-    const inp = h('input', { class: 'tag-input', placeholder: meta.tags?.length ? '＋' : '태그 추가 (Enter)' });
+    const inp = h('input', { class: 'tag-input', placeholder: meta.tags?.length ? '＋' : '태그 추가 (Enter)', enterkeyhint: 'done' });
+    const addTag = (e) => {
+      e?.preventDefault();
+      const v = inp.value.trim().replace(/,/g, '');
+      if (!v) return;
+      meta.tags = [...new Set([...(meta.tags || []), v])];
+      drawTags();
+      savePage();
+      $('.tag-input', tagsV).focus();
+    };
     inp.addEventListener('keydown', (e) => {
       if (e.isComposing || e.keyCode === 229) return;
       const v = inp.value.trim().replace(/,/g, '');
-      if ((e.key === 'Enter' || e.key === ',') && v) {
+      if (e.key === ',' && v) {
         e.preventDefault();
         meta.tags = [...new Set([...(meta.tags || []), v])];
         drawTags();
@@ -790,7 +801,7 @@ function renderProps(meta) {
       dl.innerHTML = '';
       all.forEach((t) => dl.append(h('option', { value: t })));
     }
-    tagsV.append(inp);
+    tagsV.append(h('form', { style: 'display:contents', onsubmit: addTag }, inp));
   };
   drawTags();
 
@@ -978,6 +989,11 @@ function createEditor(root, doc, onChange) {
       change();
     });
     el.addEventListener('keydown', (e) => onKey(e, el, b));
+    el.addEventListener('beforeinput', (e) => {
+      const fake = (key) => ({ key, shiftKey: false, metaKey: false, ctrlKey: false, isComposing: false, keyCode: 0, preventDefault() {} });
+      if (e.inputType === 'insertParagraph' && b.type !== 'code') { e.preventDefault(); onKey(fake('Enter'), el, b); }
+      else if (e.inputType === 'deleteContentBackward' && getSelection().isCollapsed && caretOffset(el) === 0) { e.preventDefault(); onKey(fake('Backspace'), el, b); }
+    });
     el.addEventListener('paste', (e) => onPaste(e, el, b));
     el.addEventListener('click', (e) => {
       const a = e.target.closest('a');
@@ -1471,26 +1487,26 @@ function renderBoard() {
   const allTags = [...new Set(state.pages.filter((p) => !isRetro(p)).flatMap((p) => p.tags || []))].sort();
   const visible = state.pages.filter((p) => !isRetro(p)).filter((p) => !state.tagFilter || (p.tags || []).includes(state.tagFilter));
 
-  const input = h('input', { placeholder: '떠오르는 걸 적고 Enter', autocomplete: 'off' });
-  input.addEventListener('keydown', async (e) => {
-    if (e.isComposing || e.keyCode === 229) return;
-    if (e.key !== 'Enter' || !input.value.trim()) return;
+  const input = h('input', { placeholder: '떠오르는 걸 적고 Enter', autocomplete: 'off', enterkeyhint: 'done' });
+  const addIdea = async (e) => {
+    e.preventDefault();
+    if (!input.value.trim()) return;
     const title = input.value.trim();
     input.value = '';
     const p = createPage({ title, status: 'spark', tags: state.tagFilter ? [state.tagFilter] : [], go: false, top: true });
     renderBoard();
     $('.capture input').focus();
     await p;
-  });
+  };
 
   const page = h('div', { class: 'board-page' },
     h('div', { class: 'board-head' },
       h('div', {},
         h('div', { style: 'font-size:48px;line-height:1' }, '📋'),
         h('h1', { class: 'board-title' }, '아이디어 보드'),
-        h('p', { class: 'board-desc' }, '일단 많이 꺼내고, 나중에 고르기. 카드를 끌어서 상태를 옮겨요.')),
+        h('p', { class: 'board-desc' }, TOUCH ? '일단 많이 꺼내고, 나중에 고르기. 카드 오른쪽 위 버튼으로 상태를 옮겨요.' : '일단 많이 꺼내고, 나중에 고르기. 카드를 끌어서 상태를 옮겨요.')),
     ),
-    h('div', { class: 'capture' }, h('span', {}, '💡'), input, h('span', { class: 'hint' }, 'Enter로 추가')),
+    h('form', { class: 'capture', onsubmit: addIdea }, h('span', {}, '💡'), input, h('span', { class: 'hint' }, 'Enter로 추가')),
     h('div', { class: 'toolbar' },
       h('button', { class: `chip ${!state.tagFilter ? 'on' : ''}`, onclick: () => { state.tagFilter = null; renderBoard(); } }, '전체'),
       allTags.map((t) => h('button', { class: `chip ${state.tagFilter === t ? 'on' : ''}`, onclick: () => { state.tagFilter = state.tagFilter === t ? null : t; renderBoard(); } }, `# ${t}`)),
@@ -1506,7 +1522,7 @@ function renderBoard() {
     const col = h('div', { class: 'col', 'data-status': s.key },
       h('div', { class: 'col-head' }, statusPill(s.key), h('span', { class: 'count' }, String(items.length)),
         h('button', { class: 'icon-btn sm add', title: '새 카드', onclick: () => createPage({ status: s.key }) }, '＋')));
-    if (!items.length) col.append(h('div', { class: 'col-empty' }, s.key === 'spark' ? '위 입력칸에 아무거나 적어보세요' : '카드를 여기로 끌어오세요'));
+    if (!items.length) col.append(h('div', { class: 'col-empty' }, s.key === 'spark' ? '위 입력칸에 아무거나 적어보세요' : TOUCH ? '아직 없어요' : '카드를 여기로 끌어오세요'));
     items.forEach((p) => col.append(boardCard(p)));
     bindColumnDrop(col, s.key);
     cols.append(col);
@@ -1522,6 +1538,22 @@ function boardCard(p, opts = {}) {
     p.tags?.length ? h('div', { class: 'card-tags' }, p.tags.map((t) => { const c = tagColor(t); return h('span', { class: 'tag', style: `background:var(--c-${c});color:var(--c-${c}-t)` }, t); })) : null,
   );
   if (!opts.static) {
+    const sb = h('button', { class: 'card-status', title: '상태 바꾸기', 'aria-label': '상태 바꾸기', onclick: (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      openPop(sb, STATUSES.map((s) => menuItem({
+        compact: true, icon: s.icon, label: s.label,
+        onclick: async () => {
+          closePop();
+          if ((p.status || 'spark') === s.key) return;
+          const order = Math.min(0, ...state.pages.map((x) => x.order ?? 0)) - 1;
+          Object.assign(byId(p.id), { status: s.key, order });
+          renderBoard();
+          await saveMeta(p.id, { status: s.key, order });
+        },
+      })));
+    } }, '⇄');
+    card.append(sb);
     card.addEventListener('dragstart', (e) => { e.dataTransfer.setData('text/x-card', p.id); card.classList.add('dragging'); });
     card.addEventListener('dragend', () => card.classList.remove('dragging'));
   }
