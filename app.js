@@ -116,7 +116,7 @@ const localApi = {
 };
 
 // front matter — server.js 와 같은 형식
-const META_KEYS = ['title', 'icon', 'kind', 'period', 'key', 'score', 'status', 'tags', 'parent', 'order', 'created', 'updated'];
+const META_KEYS = ['title', 'icon', 'kind', 'period', 'key', 'score', 'view', 'status', 'tags', 'parent', 'order', 'created', 'updated'];
 function parseFile(text) {
   const meta = {};
   let body = text;
@@ -432,6 +432,16 @@ const state = {
 };
 const byId = (id) => state.pages.find((p) => p.id === id);
 const isRetro = (p) => p && p.kind === 'retro';
+const isFolder = (p) => p && p.kind === 'folder';
+// 폴더 안(몇 단계 아래든)에 있는 문서인지
+const inFolder = (p) => {
+  const seen = new Set();
+  let cur = p;
+  while (cur && cur.parent && !seen.has(cur.id)) { seen.add(cur.id); cur = byId(cur.parent); if (isFolder(cur)) return true; }
+  return false;
+};
+// 지금 화면(보드·폴더)을 다시 그리는 함수 — 카드 상태를 바꾸면 이걸 부른다
+let refreshView = () => {};
 const childrenOf = (id) => state.pages
   .filter((p) => (p.parent || null) === (id || null) && !(id == null && isRetro(p)))
   .sort((a, b) => (a.order ?? 0) - (b.order ?? 0) || String(a.created).localeCompare(String(b.created)));
@@ -448,7 +458,8 @@ const savePage = debounce(async () => {
   setSaveText('저장 중…');
   const body = blocksToMd(pg.blocks);
   const res = await api.save(pg.id, pg.meta, body);
-  pg.meta = res.meta;
+  // 화면이 같은 객체를 들고 있으니 바꿔치기하지 말고 내용만 갱신
+  Object.assign(pg.meta, res.meta);
   const preview = body.replace(/<[^>]+>/g, ' ').replace(/\]\([^)]*\)/g, '').replace(/[#>*`~\[\]]|^- |\n- /g, ' ').replace(/\s+/g, ' ').trim().slice(0, 140);
   upsertListEntry({ id: pg.id, ...res.meta, preview });
   saving--;
@@ -532,6 +543,9 @@ function treeItem(p, depth, activeId, flat) {
 
 $('#search').addEventListener('input', renderTree);
 $('#add-root').addEventListener('click', () => createPage());
+const createFolder = (parent = null) => createPage({ parent, extra: { kind: 'folder', icon: '📁', view: 'board' } });
+$('#add-folder').addEventListener('click', () => createFolder());
+$('#add-folder-2').addEventListener('click', () => createFolder());
 $('#add-root-2').addEventListener('click', () => createPage());
 $('#side-open').addEventListener('click', () => document.body.classList.add('side-open'));
 $('#side-close').addEventListener('click', () => document.body.classList.remove('side-open'));
@@ -637,12 +651,12 @@ function emojiPicker(anchor, onPick, allowRemove) {
 }
 
 // ---------- 페이지 생성/삭제 ----------
-async function createPage({ parent = null, title = '', status = 'spark', body = '', tags = [], go = true, top = false } = {}) {
+async function createPage({ parent = null, title = '', status = 'spark', body = '', tags = [], go = true, top = false, extra = {} } = {}) {
   const id = newPageId();
   const orders = state.pages.map((s) => s.order ?? 0);
   // 보드에서 바로 적은 카드는 맨 위로, 나머지는 맨 아래로
   const order = !orders.length ? 1 : top ? Math.min(...orders) - 1 : Math.max(...orders) + 1;
-  const meta = { title, status, parent, order, tags };
+  const meta = { title, status, parent, order, tags, ...extra };
   upsertListEntry({ id, ...meta, created: new Date().toISOString(), preview: '' });
   const res = await api.save(id, meta, body);
   upsertListEntry({ id, ...res.meta });
@@ -685,6 +699,15 @@ async function openPage(id) {
   moreBtn.hidden = false;
   moreBtn.onclick = () => openPop(moreBtn, [
     menuItem({ icon: '＋', label: '하위 페이지 추가', compact: true, onclick: () => { closePop(); createPage({ parent: id }); } }),
+    menuItem({ icon: '↪', label: '폴더로 옮기기', compact: true, onclick: () => { closePop(); moveToFolderMenu(moreBtn, id); } }),
+    isRetro(data.meta) ? null : menuItem({ icon: isFolder(data.meta) ? '📄' : '📁', label: isFolder(data.meta) ? '일반 페이지로 바꾸기' : '폴더로 바꾸기', compact: true, onclick: () => {
+      closePop();
+      const m = state.page.meta;
+      if (isFolder(m)) delete m.kind; else { m.kind = 'folder'; m.view = m.view || 'board'; if (!m.icon) m.icon = '📁'; }
+      upsertListEntry({ id, kind: m.kind || null, icon: m.icon });
+      savePage.flush();
+      setTimeout(route, 300);
+    } }),
     menuItem({ icon: '📄', label: `data/pages/${id}.md`, compact: true, onclick: () => { navigator.clipboard?.writeText(`data/pages/${id}.md`); closePop(); toast('파일 경로를 복사했어요'); } }),
     h('div', { class: 'pop-sep' }),
     menuItem({ icon: '🗑', label: '페이지 삭제', danger: true, compact: true, onclick: () => { closePop(); deletePage(id); } }),
@@ -729,7 +752,11 @@ async function openPage(id) {
 
   page.append(iconWrap, title, renderProps(meta));
 
-  const kids = childrenOf(id);
+  if (isFolder(meta)) {
+    page.classList.add('folder-page');
+    page.append(folderCollection({ id, meta }));
+  }
+  const kids = isFolder(meta) ? [] : childrenOf(id);
   if (kids.length) {
     page.append(h('div', { class: 'subpages' }, kids.map((k) =>
       h('a', { class: 'subpage', href: `#/p/${k.id}` }, h('span', {}, k.icon || '📄'), h('span', {}, k.title || '제목 없음')))));
@@ -737,7 +764,7 @@ async function openPage(id) {
 
   const edWrap = h('div', { class: 'editor' });
   page.append(edWrap);
-  page.append(h('div', { class: 'editor-tail', onclick: () => {
+  if (!isFolder(meta) || blocks.length) page.append(h('div', { class: isFolder(meta) ? 'editor-tail short' : 'editor-tail', onclick: () => {
     const last = state.page.blocks[state.page.blocks.length - 1];
     if (last && last.type === 'p' && !last.text) return editor.focus(last.id, 'end');
     const b = { id: uid(), type: 'p', text: '' };
@@ -782,6 +809,7 @@ function statusPill(key) {
 
 function renderProps(meta) {
   if (isRetro(meta)) return renderRetroProps(meta);
+  if (isFolder(meta)) return h('div', { class: 'folder-desc prop-muted' }, `📁 폴더 · 만든 날 ${fmtDate(meta.created)}`);
   const props = h('div', { class: 'props' });
   // 상태
   const statusV = h('div', { class: 'prop-v click' }, statusPill(meta.status));
@@ -1703,6 +1731,111 @@ function renderRetro(period) {
   ));
 }
 
+// ---------- 보드 칸 (메인 보드·폴더 공용) ----------
+function boardColumns(pages, { parent = null }) {
+  const cols = h('div', { class: 'columns' });
+  for (const s of STATUSES) {
+    const items = pages.filter((p) => (p.status || 'spark') === s.key)
+      .sort((a, b) => (a.order ?? 0) - (b.order ?? 0) || String(b.created).localeCompare(String(a.created)));
+    const col = h('div', { class: 'col', 'data-status': s.key },
+      h('div', { class: 'col-head' }, statusPill(s.key), h('span', { class: 'count' }, String(items.length)),
+        h('button', { class: 'icon-btn sm add', title: '새 카드', onclick: () => createPage({ status: s.key, parent }) }, '＋')));
+    if (!items.length) col.append(h('div', { class: 'col-empty' }, s.key === 'spark' ? '위 입력칸에 아무거나 적어보세요' : TOUCH ? '아직 없어요' : '카드를 여기로 끌어오세요'));
+    items.forEach((p) => col.append(boardCard(p)));
+    bindColumnDrop(col, s.key);
+    cols.append(col);
+  }
+  return cols;
+}
+
+// ---------- 폴더 (노션 데이터베이스처럼 하위 문서를 보드·갤러리·목록으로) ----------
+const FOLDER_VIEWS = [
+  { key: 'board', label: '보드', icon: '▥' },
+  { key: 'gallery', label: '갤러리', icon: '▦' },
+  { key: 'list', label: '목록', icon: '☰' },
+];
+function folderCollection(folder) {
+  const wrap = h('div', { class: 'folder-coll' });
+  const draw = () => {
+    refreshView = draw;
+    const meta = state.page && state.page.id === folder.id ? state.page.meta : folder.meta;
+    const view = meta.view || 'board';
+    const kids = childrenOf(folder.id).filter((p) => !isRetro(p));
+    const docs = kids.filter((p) => !isFolder(p));
+    const subFolders = kids.filter(isFolder);
+    wrap.innerHTML = '';
+
+    const input = h('input', { placeholder: '이 폴더에 바로 적고 Enter', autocomplete: 'off', enterkeyhint: 'done' });
+    const add = async (e) => {
+      e.preventDefault();
+      const title = input.value.trim();
+      if (!title) return;
+      input.value = '';
+      const p = createPage({ title, parent: folder.id, go: false, top: true });
+      draw();
+      $('.folder-coll .capture input')?.focus();
+      await p;
+    };
+    wrap.append(
+      h('div', { class: 'folder-bar' },
+        h('div', { class: 'tabs view-tabs' }, FOLDER_VIEWS.map((v) => h('button', { class: `tab ${view === v.key ? 'on' : ''}`, onclick: () => { meta.view = v.key; savePage(); draw(); } }, `${v.icon} ${v.label}`))),
+        h('span', { class: 'spacer' }),
+        h('button', { class: 'btn ghost', onclick: () => createFolder(folder.id) }, '📁 하위 폴더'),
+        h('button', { class: 'btn', onclick: () => createPage({ parent: folder.id }) }, '＋ 새 문서')),
+      h('form', { class: 'capture', onsubmit: add }, h('span', {}, '💡'), input, h('span', { class: 'hint' }, 'Enter로 추가')),
+    );
+    if (subFolders.length) {
+      wrap.append(h('div', { class: 'folder-subs' }, subFolders.map((f) => h('a', { class: 'folder-chip', href: `#/p/${f.id}` },
+        h('span', {}, f.icon || '📁'), h('span', {}, f.title || '제목 없는 폴더'), h('span', { class: 'count' }, String(childrenOf(f.id).length))))));
+    }
+    if (view === 'board') wrap.append(boardColumns(docs, { parent: folder.id }));
+    else if (!docs.length) wrap.append(h('div', { class: 'col-empty' }, '아직 문서가 없어요. 위 입력칸에 적거나 「＋ 새 문서」를 눌러보세요'));
+    else if (view === 'gallery') {
+      const sorted = [...docs].sort((a, b) => String(b.updated || '').localeCompare(String(a.updated || '')));
+      wrap.append(h('div', { class: 'gallery' }, sorted.map((p) => {
+        const c = boardCard(p);
+        c.classList.add('gallery-card');
+        c.insertBefore(h('div', { class: 'gallery-meta' }, statusPill(p.status)), c.firstChild.nextSibling);
+        return c;
+      })));
+    } else {
+      const sorted = [...docs].sort((a, b) => String(b.updated || '').localeCompare(String(a.updated || '')));
+      wrap.append(h('div', { class: 'doc-list' },
+        h('div', { class: 'doc-row head' }, h('span', {}, '이름'), h('span', {}, '상태'), h('span', { class: 'hide-sm' }, '태그'), h('span', { class: 'hide-sm' }, '고친 날')),
+        sorted.map((p) => h('a', { class: 'doc-row', href: `#/p/${p.id}` },
+          h('span', { class: 'doc-name' }, h('span', {}, p.icon || '📄'), h('span', {}, p.title || '제목 없음')),
+          h('span', {}, statusPill(p.status)),
+          h('span', { class: 'hide-sm doc-tags' }, (p.tags || []).map((t) => { const c = tagColor(t); return h('span', { class: 'tag', style: `background:var(--c-${c});color:var(--c-${c}-t)` }, t); })),
+          h('span', { class: 'hide-sm prop-muted' }, p.updated ? fmtDate(p.updated).replace(/^\d+년 /, '') : '')))));
+    }
+  };
+  draw();
+  return wrap;
+}
+
+// 폴더로 옮기기
+function moveToFolderMenu(anchor, id) {
+  const me = byId(id) || { id };
+  const isDesc = (f) => { let cur = f; const seen = new Set(); while (cur && !seen.has(cur.id)) { if (cur.id === id) return true; seen.add(cur.id); cur = cur.parent ? byId(cur.parent) : null; } return false; };
+  const targets = state.pages.filter((p) => isFolder(p) && !isDesc(p));
+  const go = async (parent) => {
+    closePop();
+    const order = Math.min(0, ...state.pages.map((x) => x.order ?? 0)) - 1;
+    if (state.page?.id === id) { state.page.meta.parent = parent; state.page.meta.order = order; savePage.flush(); }
+    else await saveMeta(id, { parent, order });
+    upsertListEntry({ id, parent, order });
+    if (parent) { state.expanded[parent] = true; store.set('expanded', state.expanded); }
+    renderTree(); renderCrumbs();
+    toast(parent ? `「${byId(parent).title || '폴더'}」로 옮겼어요` : '맨 위로 옮겼어요');
+  };
+  openPop(anchor, [
+    h('div', { class: 'pop-label' }, '어디로 옮길까요?'),
+    me.parent ? menuItem({ compact: true, icon: '⤒', label: '맨 위 (폴더 밖)', onclick: () => go(null) }) : null,
+    ...targets.map((f) => menuItem({ compact: true, icon: f.icon || '📁', label: f.title || '제목 없는 폴더', onclick: () => go(f.id) })),
+    targets.length ? null : h('div', { class: 'pop-empty' }, '폴더가 없어요. 사이드바에서 「📁 새 폴더」로 만들어요'),
+  ]);
+}
+
 // ---------- 아이디어 보드 ----------
 function renderBoard() {
   state.page = null;
@@ -1712,8 +1845,10 @@ function renderBoard() {
   const view = $('#view');
   view.innerHTML = '';
 
-  const allTags = [...new Set(state.pages.filter((p) => !isRetro(p)).flatMap((p) => p.tags || []))].sort();
-  const visible = state.pages.filter((p) => !isRetro(p)).filter((p) => !state.tagFilter || (p.tags || []).includes(state.tagFilter));
+  refreshView = renderBoard;
+  const boardPages = state.pages.filter((p) => !isRetro(p) && !isFolder(p) && !inFolder(p));
+  const allTags = [...new Set(boardPages.flatMap((p) => p.tags || []))].sort();
+  const visible = boardPages.filter((p) => !state.tagFilter || (p.tags || []).includes(state.tagFilter));
 
   const input = h('input', { placeholder: '떠오르는 걸 적고 Enter', autocomplete: 'off', enterkeyhint: 'done' });
   const addIdea = async (e) => {
@@ -1743,18 +1878,7 @@ function renderBoard() {
     ),
   );
 
-  const cols = h('div', { class: 'columns' });
-  for (const s of STATUSES) {
-    const items = visible.filter((p) => (p.status || 'spark') === s.key)
-      .sort((a, b) => (a.order ?? 0) - (b.order ?? 0) || String(b.created).localeCompare(String(a.created)));
-    const col = h('div', { class: 'col', 'data-status': s.key },
-      h('div', { class: 'col-head' }, statusPill(s.key), h('span', { class: 'count' }, String(items.length)),
-        h('button', { class: 'icon-btn sm add', title: '새 카드', onclick: () => createPage({ status: s.key }) }, '＋')));
-    if (!items.length) col.append(h('div', { class: 'col-empty' }, s.key === 'spark' ? '위 입력칸에 아무거나 적어보세요' : TOUCH ? '아직 없어요' : '카드를 여기로 끌어오세요'));
-    items.forEach((p) => col.append(boardCard(p)));
-    bindColumnDrop(col, s.key);
-    cols.append(col);
-  }
+  const cols = boardColumns(visible, {});
   page.append(cols);
   view.append(page);
 }
@@ -1776,7 +1900,7 @@ function boardCard(p, opts = {}) {
           if ((p.status || 'spark') === s.key) return;
           const order = Math.min(0, ...state.pages.map((x) => x.order ?? 0)) - 1;
           Object.assign(byId(p.id), { status: s.key, order });
-          renderBoard();
+          refreshView();
           await saveMeta(p.id, { status: s.key, order });
         },
       })));
@@ -1808,14 +1932,14 @@ function bindColumnDrop(col, statusKey) {
     }
     const p = byId(id);
     Object.assign(p, { status: statusKey, order });
-    renderBoard();
+    refreshView();
     await saveMeta(id, { status: statusKey, order });
   });
 }
 
 // 🎲 섞어보기 — 무작위 두 아이디어 + 발상 질문
 function openShuffle() {
-  const pool = state.pages.filter((p) => p.title && !isRetro(p));
+  const pool = state.pages.filter((p) => p.title && !isRetro(p) && !isFolder(p));
   if (pool.length < 2) { toast('아이디어가 두 개 이상 있어야 섞을 수 있어요'); return; }
   const scrim = h('div', { class: 'modal-scrim', onclick: (e) => { if (e.target === scrim) scrim.remove(); } });
   const modal = h('div', { class: 'modal' });
