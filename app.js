@@ -92,7 +92,12 @@ const store = {
 };
 
 // ---------- API ----------
-const api = {
+// 내 컴퓨터(localhost)에서는 server.js 가 파일을 쓰고,
+// 웹(GitHub Pages)에서는 브라우저가 GitHub 저장소에 바로 커밋한다.
+const LOCAL = ['localhost', '127.0.0.1', '[::1]'].includes(location.hostname);
+const GH = { repo: 'jamie-pd/idea-note', branch: 'main', dir: 'data/pages' };
+
+const localApi = {
   async list() { return (await fetch('/api/pages')).json(); },
   async get(id) { const r = await fetch(`/api/pages/${id}`); return r.ok ? r.json() : null; },
   async save(id, meta, body) {
@@ -108,6 +113,140 @@ const api = {
     return r.json();
   },
 };
+
+// front matter — server.js 와 같은 형식
+const META_KEYS = ['title', 'icon', 'kind', 'period', 'key', 'score', 'status', 'tags', 'parent', 'order', 'created', 'updated'];
+function parseFile(text) {
+  const meta = {};
+  let body = text;
+  const m = text.match(/^---\n([\s\S]*?)\n---\n?/);
+  if (m) {
+    body = text.slice(m[0].length);
+    for (const line of m[1].split('\n')) {
+      const i = line.indexOf(':');
+      if (i < 0) continue;
+      const raw = line.slice(i + 1).trim();
+      try { meta[line.slice(0, i).trim()] = JSON.parse(raw); } catch { meta[line.slice(0, i).trim()] = raw; }
+    }
+  }
+  return { meta, body: body.replace(/^\n/, '') };
+}
+function serializeFile(meta, body) {
+  const lines = META_KEYS.filter((k) => meta[k] !== undefined && meta[k] !== null && meta[k] !== '').map((k) => `${k}: ${JSON.stringify(meta[k])}`);
+  return `---\n${lines.join('\n')}\n---\n\n${(body || '').trimEnd()}\n`;
+}
+const makePreview = (body) => (body || '').replace(/<[^>]+>/g, ' ').replace(/\]\([^)]*\)/g, '').replace(/[#>*`~\[\]]|^- |\n- /g, ' ').replace(/\s+/g, ' ').trim().slice(0, 140);
+const b64decode = (s) => new TextDecoder().decode(Uint8Array.from(atob(s.replace(/\n/g, '')), (c) => c.charCodeAt(0)));
+
+const ghApi = (() => {
+  const remote = {};             // id -> { meta, body } (GitHub 에 있는 것)
+  let pending = store.get('gh-pending', {}); // id -> { meta, body } | { deleted: true } (아직 안 올린 것)
+  let lastCommit = store.get('gh-last', null);
+  let committing = null;
+  const keepPending = () => store.set('gh-pending', pending);
+  const token = () => store.get('gh-token', '');
+
+  async function req(path, opts = {}) {
+    const r = await fetch(`https://api.github.com${path}`, {
+      ...opts,
+      headers: { Authorization: `Bearer ${token()}`, Accept: 'application/vnd.github+json', ...(opts.body ? { 'Content-Type': 'application/json' } : {}) },
+    });
+    if (!r.ok) { const e = new Error(`GitHub ${r.status}`); e.status = r.status; throw e; }
+    return r.status === 204 ? null : r.json();
+  }
+  const current = (id) => {
+    const p = pending[id];
+    if (p) return p.deleted ? null : p;
+    return remote[id] || null;
+  };
+  const ids = () => [...new Set([...Object.keys(remote), ...Object.keys(pending)])].filter((id) => current(id));
+
+  async function list() {
+    const tree = await req(`/repos/${GH.repo}/git/trees/${GH.branch}?recursive=1`);
+    const files = tree.tree.filter((t) => t.type === 'blob' && t.path.startsWith(GH.dir + '/') && t.path.endsWith('.md'));
+    // 내용이 같은 파일(sha)은 브라우저에 캐시해 둔 걸 쓴다
+    const cache = store.get('gh-blobs', {});
+    const fresh = {};
+    await Promise.all(files.map(async (f) => {
+      let text = cache[f.sha];
+      if (text == null) text = b64decode((await req(`/repos/${GH.repo}/git/blobs/${f.sha}`)).content);
+      fresh[f.sha] = text;
+      remote[f.path.slice(GH.dir.length + 1, -3)] = parseFile(text);
+    }));
+    store.set('gh-blobs', fresh);
+    return ids().map((id) => { const c = current(id); return { id, ...c.meta, preview: makePreview(c.body) }; });
+  }
+
+  const autoCommit = debounce(() => { if (Object.keys(pending).length) commit(); }, 15000);
+  document.addEventListener('visibilitychange', () => { if (document.hidden && Object.keys(pending).length) commit(); });
+
+  async function commit(message) {
+    if (committing) return committing;
+    committing = (async () => {
+      const snap = JSON.parse(JSON.stringify(pending));
+      const entries = Object.entries(snap)
+        .filter(([id, p]) => !(p.deleted && !remote[id]))
+        .map(([id, p]) => ({ path: `${GH.dir}/${id}.md`, mode: '100644', type: 'blob', ...(p.deleted ? { sha: null } : { content: serializeFile(p.meta, p.body) }) }));
+      const done = () => {
+        for (const [id, p] of Object.entries(snap)) {
+          if (JSON.stringify(pending[id]) !== JSON.stringify(p)) continue; // 올리는 사이 또 고친 건 남긴다
+          delete pending[id];
+          if (p.deleted) delete remote[id]; else remote[id] = p;
+        }
+        keepPending();
+      };
+      if (!entries.length) { done(); return { ok: true, nothing: true }; }
+      const n = entries.length;
+      const msg = (message || '').trim() || `웹에서 아이디어 노트 업데이트 (${n}개 파일)`;
+      for (let attempt = 0; attempt < 3; attempt++) {
+        try {
+          const ref = await req(`/repos/${GH.repo}/git/ref/heads/${GH.branch}`);
+          const base = await req(`/repos/${GH.repo}/git/commits/${ref.object.sha}`);
+          const tree = await req(`/repos/${GH.repo}/git/trees`, { method: 'POST', body: JSON.stringify({ base_tree: base.tree.sha, tree: entries }) });
+          const c = await req(`/repos/${GH.repo}/git/commits`, { method: 'POST', body: JSON.stringify({ message: msg, tree: tree.sha, parents: [ref.object.sha] }) });
+          await req(`/repos/${GH.repo}/git/refs/heads/${GH.branch}`, { method: 'PATCH', body: JSON.stringify({ sha: c.sha }) });
+          done();
+          lastCommit = Date.now();
+          store.set('gh-last', lastCommit);
+          return { ok: true, pushed: true };
+        } catch (e) {
+          if (e.status === 401) return { ok: false, error: '토큰이 만료됐거나 잘못됐어요' };
+          if (attempt === 2) return { ok: false, error: e.message };
+        }
+      }
+    })();
+    try { return await committing; } finally { committing = null; refreshGit(); }
+  }
+
+  return {
+    hasToken: () => !!token(),
+    async check(t) {
+      const r = await fetch(`https://api.github.com/repos/${GH.repo}`, { headers: { Authorization: `Bearer ${t}`, Accept: 'application/vnd.github+json' } });
+      if (!r.ok) return false;
+      const j = await r.json();
+      return !!j.permissions?.push;
+    },
+    setToken(t) { store.set('gh-token', t); },
+    logout() { try { localStorage.removeItem('gh-token'); } catch {} },
+    list,
+    async get(id) { const c = current(id); return c ? { id, meta: c.meta, body: c.body } : null; },
+    async save(id, meta, body) {
+      const prev = current(id) || { meta: {}, body: '' };
+      const next = { ...prev.meta, ...meta, updated: new Date().toISOString() };
+      for (const k of Object.keys(next)) if (next[k] === null) delete next[k];
+      if (!next.created) next.created = next.updated;
+      pending[id] = { meta: next, body: body ?? prev.body };
+      keepPending();
+      autoCommit();
+      return { id, meta: next };
+    },
+    async remove(id) { pending[id] = { deleted: true }; keepPending(); autoCommit(); },
+    async git() { return { repo: true, web: true, remote: true, changes: Object.keys(pending).length, last: lastCommit }; },
+    commit,
+  };
+})();
+
+const api = LOCAL ? localApi : ghApi;
 
 // ---------- 인라인 마크다운 <-> HTML ----------
 function mdToHtml(md) {
@@ -377,6 +516,23 @@ function renderGit() {
     return;
   }
   const dirty = gitInfo.changes > 0;
+  if (gitInfo.web) {
+    bar.append(h('div', { class: 'git-row' },
+      h('span', { class: `git-dot ${dirty ? 'dirty' : ''}` }),
+      h('span', { class: 'git-text' },
+        dirty ? `GitHub 에 올릴 변경 ${gitInfo.changes}개` : 'GitHub 에 다 올라감',
+        h('div', { class: 'git-sub' }, dirty ? '잠시 뒤 자동으로 올라가요' : gitInfo.last ? `마지막 저장 ${ago(gitInfo.last)}` : GH.repo)),
+      h('button', { class: 'btn', disabled: !dirty, onclick: async () => {
+        savePage.flush();
+        const r = await api.commit();
+        toast(r.ok ? (r.nothing ? '올릴 변경이 없어요' : 'GitHub 에 올렸어요') : '올리기 실패: ' + (r.error || ''));
+      } }, '지금 올리기'),
+      h('button', { class: 'icon-btn sm', title: '토큰 지우기(로그아웃)', onclick: () => {
+        if (dirty && !confirm('아직 안 올린 변경이 있어요. 그래도 로그아웃할까요? (변경은 이 브라우저에 남아요)')) return;
+        ghApi.logout(); location.reload();
+      } }, '⏏')));
+    return;
+  }
   const btn = h('button', { class: 'btn', disabled: !dirty, onclick: (e) => openCommitPop(e.currentTarget) }, '커밋');
   bar.append(h('div', { class: 'git-row' },
     h('span', { class: `git-dot ${dirty ? 'dirty' : ''}` }),
@@ -1443,8 +1599,43 @@ function openShuffle() {
 }
 
 // ---------- 시작 ----------
+function renderConnect(error) {
+  $('#page-more').hidden = true;
+  $('#crumbs').innerHTML = '';
+  const view = $('#view');
+  view.innerHTML = '';
+  const input = h('input', { class: 'pop-input', type: 'password', placeholder: 'github_pat_… 또는 ghp_…', autocomplete: 'off', style: 'font-size:15px;padding:10px 12px' });
+  const msg = h('div', { class: 'pi-sub', style: 'color:var(--danger);min-height:18px' }, error || '');
+  const go = async () => {
+    const t = input.value.trim();
+    if (!t) return;
+    msg.textContent = '확인하는 중…';
+    if (await ghApi.check(t)) { ghApi.setToken(t); location.reload(); }
+    else msg.textContent = `이 토큰으로는 ${GH.repo} 에 쓸 수 없어요. 저장소 권한(Contents: Read and write)을 확인해 주세요.`;
+  };
+  input.addEventListener('keydown', (e) => { if (e.key === 'Enter') go(); });
+  view.append(h('div', { class: 'page', style: 'max-width:560px' },
+    h('div', { style: 'font-size:56px;line-height:1' }, '💡'),
+    h('h1', { class: 'page-title' }, 'GitHub 연결'),
+    h('p', { style: 'color:var(--text-2);margin:0 0 20px' }, `아이디어와 회고는 GitHub 비공개 저장소 ${GH.repo} 에 저장돼요. 이 브라우저에서 처음 한 번만 토큰을 넣어주세요.`),
+    h('ol', { style: 'color:var(--text-2);font-size:14.5px;padding-left:20px;margin:0 0 20px;line-height:1.8' },
+      h('li', {}, h('a', { href: 'https://github.com/settings/personal-access-tokens/new', target: '_blank', rel: 'noopener' }, 'jamie-pd 계정에서 새 토큰 만들기'), ' (Fine-grained)'),
+      h('li', {}, 'Repository access → Only select repositories → idea-note'),
+      h('li', {}, 'Permissions → Contents → Read and write'),
+      h('li', {}, '만든 토큰을 아래에 붙여넣기')),
+    input, msg,
+    h('div', { style: 'margin-top:12px' }, h('button', { class: 'btn', style: 'padding:8px 16px;font-size:14.5px', onclick: go }, '연결하기')),
+    h('p', { class: 'pi-sub', style: 'margin-top:20px' }, '토큰은 이 브라우저에만 저장되고 GitHub 말고 다른 곳으로 보내지 않아요.'),
+  ));
+}
+
 (async function init() {
-  state.pages = await api.list();
+  if (!LOCAL && !ghApi.hasToken()) { renderConnect(); return; }
+  try { state.pages = await api.list(); }
+  catch (e) {
+    if (!LOCAL && (e.status === 401 || e.status === 404)) { ghApi.logout(); renderConnect('토큰이 만료됐거나 저장소에 접근할 수 없어요. 다시 넣어주세요.'); return; }
+    throw e;
+  }
   await route();
   refreshGit.flush();
   setInterval(() => refreshGit(), 15000);
