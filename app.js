@@ -8,7 +8,72 @@ const STATUSES = [
   { key: 'pick', label: '채택', icon: '✅', color: 'blue' },
   { key: 'park', label: '보류', icon: '💤', color: 'gray' },
 ];
-const statusOf = (k) => STATUSES.find((s) => s.key === k) || STATUSES[0];
+// 폴더 템플릿마다 상태 칸이 다르다 (키는 서로 겹치지 않게)
+const STATUS_SETS = {
+  idea: STATUSES,
+  task: [
+    { key: 'todo', label: '할 일', icon: '📋', color: 'gray' },
+    { key: 'doing', label: '진행 중', icon: '🏃', color: 'blue' },
+    { key: 'review', label: '검토', icon: '👀', color: 'orange' },
+    { key: 'done', label: '완료', icon: '✅', color: 'green' },
+  ],
+  spec: [
+    { key: 'draft', label: '초안', icon: '✏️', color: 'gray' },
+    { key: 'specreview', label: '리뷰 중', icon: '👀', color: 'orange' },
+    { key: 'final', label: '확정', icon: '📌', color: 'blue' },
+    { key: 'spechold', label: '보류', icon: '💤', color: 'brown' },
+  ],
+  meeting: [
+    { key: 'planned', label: '예정', icon: '🗓️', color: 'gray' },
+    { key: 'held', label: '진행함', icon: '✅', color: 'green' },
+    { key: 'followup', label: '후속 필요', icon: '🔁', color: 'orange' },
+  ],
+  ref: [
+    { key: 'unread', label: '안 읽음', icon: '🆕', color: 'blue' },
+    { key: 'read', label: '읽음', icon: '📖', color: 'green' },
+    { key: 'keep', label: '자주 봄', icon: '⭐', color: 'yellow' },
+  ],
+};
+const ALL_STATUSES = Object.values(STATUS_SETS).flat();
+const statusOf = (k) => ALL_STATUSES.find((s) => s.key === k) || STATUSES[0];
+const today = () => { const d = new Date(); return `${d.getFullYear()}.${d.getMonth() + 1}.${d.getDate()}`; };
+
+// 폴더 템플릿 — 상태 칸, 기본 보기, 새 문서 틀
+const FOLDER_TEMPLATES = [
+  { id: 'idea', icon: '💡', name: '아이디어 보드', desc: '떠오르는 걸 빠르게 적고 발산 → 키우는 중 → 채택으로 옮겨요', view: 'board', set: 'idea' },
+  { id: 'task', icon: '✅', name: '할 일 · 프로젝트', desc: '할 일 → 진행 중 → 검토 → 완료 칸반', view: 'board', set: 'task',
+    doc: () => ['## 할 일', '- [ ] ', '## 메모', ''].join('\n\n') },
+  { id: 'spec', icon: '📝', name: '기획서', desc: '배경 · 목표 · 해결안 · 화면 · 확인 필요가 들어간 기획 문서 묶음', view: 'list', set: 'spec',
+    doc: () => [
+      '<aside>📝 한 줄 요약: </aside>',
+      '## 1. 배경', '- ',
+      '## 2. 목표와 지표', '- 목표: ', '- 지표: ',
+      '## 3. 문제', '- ',
+      '## 4. 해결안', '- ',
+      '## 5. 화면', '- 앱: ', '- 데스크톱 웹: ', '- 모바일 웹: ',
+      '## 6. 정책 · 예외', '- ',
+      '## 7. 확인 필요', '- [ ] ',
+    ].join('\n\n') },
+  { id: 'meeting', icon: '🗓️', name: '회의록', desc: '일시 · 안건 · 논의 · 결정 사항 · 확인 필요 순서의 회의록', view: 'list', set: 'meeting',
+    title: () => `${today()} 회의`,
+    doc: () => [
+      `<aside>🗓️ 일시: ${today()} · 참석: </aside>`,
+      '## 안건', '1. ',
+      '## 논의', '1. ',
+      '## 결정 사항', '- ',
+      '## 확인 필요', '- [ ] ',
+    ].join('\n\n') },
+  { id: 'ref', icon: '📚', name: '레퍼런스 모음', desc: '링크 · 캡처 · 경쟁사 사례를 카드로 모아봐요', view: 'gallery', set: 'ref',
+    doc: () => ['- 링크: ', '- 어디서 봤나: ', '## 좋았던 점', '- ', '## 우리한테 가져올 것', '- '].join('\n\n') },
+  { id: 'blank', icon: '📁', name: '빈 폴더', desc: '틀 없이 문서만 모아요', view: 'list', set: 'idea' },
+];
+const tplOf = (folderMeta) => FOLDER_TEMPLATES.find((t) => t.id === (folderMeta?.tpl || 'idea')) || FOLDER_TEMPLATES[0];
+// 페이지(또는 폴더)가 쓰는 상태 칸
+const statusesFor = (p) => {
+  if (!p) return STATUSES;
+  const f = p.kind === 'folder' ? p : folderOf(p);
+  return f ? STATUS_SETS[tplOf(f).set] : STATUSES;
+};
 const TAG_COLORS = ['blue', 'green', 'purple', 'orange', 'pink', 'yellow', 'red', 'brown', 'gray'];
 const tagColor = (t) => {
   let h = 0;
@@ -116,7 +181,7 @@ const localApi = {
 };
 
 // front matter — server.js 와 같은 형식
-const META_KEYS = ['title', 'icon', 'kind', 'period', 'key', 'score', 'view', 'status', 'tags', 'parent', 'order', 'created', 'updated'];
+const META_KEYS = ['title', 'icon', 'kind', 'period', 'key', 'score', 'view', 'tpl', 'status', 'tags', 'parent', 'order', 'created', 'updated'];
 function parseFile(text) {
   const meta = {};
   let body = text;
@@ -549,7 +614,30 @@ function treeItem(p, depth, activeId, flat) {
 
 $('#search').addEventListener('input', renderTree);
 $('#add-root').addEventListener('click', () => createPage());
-const createFolder = (parent = null) => createPage({ parent, extra: { kind: 'folder', icon: '📁', view: 'board' } });
+const createFolder = (parent = null) => openTemplatePicker((tpl) => createPage({
+  parent, title: tpl.id === 'blank' ? '' : tpl.name, status: 'spark', extra: { kind: 'folder', icon: tpl.icon, view: tpl.view, tpl: tpl.id },
+}));
+function openTemplatePicker(onPick, current) {
+  const scrim = h('div', { class: 'modal-scrim', onclick: (e) => { if (e.target === scrim) close(); } });
+  const close = () => { scrim.remove(); document.removeEventListener('keydown', esc); };
+  const esc = (e) => { if (e.key === 'Escape') close(); };
+  document.addEventListener('keydown', esc);
+  const viewName = { board: '보드', gallery: '갤러리', list: '목록' };
+  scrim.append(h('div', { class: 'modal tpl-modal' },
+    h('h3', {}, current ? '템플릿 바꾸기' : '어떤 폴더를 만들까요?'),
+    h('p', { class: 'sub' }, '템플릿마다 상태 칸과 새 문서 틀이 달라요. 나중에 폴더에서 바꿀 수 있어요.'),
+    h('div', { class: 'tpl-grid' }, FOLDER_TEMPLATES.map((t) => h('button', { class: `tpl-card ${current === t.id ? 'on' : ''}`, onclick: () => { close(); onPick(t); } },
+      h('div', { class: 'tpl-icon' }, t.icon),
+      h('div', { class: 'tpl-name' }, t.name),
+      h('div', { class: 'tpl-desc' }, t.desc),
+      h('div', { class: 'tpl-meta' },
+        h('span', { class: 'tpl-view' }, viewName[t.view]),
+        STATUS_SETS[t.set].map((s) => h('span', { class: 'tpl-st', style: `background:var(--c-${s.color});color:var(--c-${s.color}-t)` }, s.label)),
+        t.doc ? h('span', { class: 'tpl-view' }, '문서 틀') : null),
+    ))),
+  ));
+  document.body.append(scrim);
+}
 $('#add-folder').addEventListener('click', () => createFolder());
 $('#add-folder-2').addEventListener('click', () => createFolder());
 $('#add-root-2').addEventListener('click', () => createPage());
@@ -657,11 +745,19 @@ function emojiPicker(anchor, onPick, allowRemove) {
 }
 
 // ---------- 페이지 생성/삭제 ----------
-async function createPage({ parent = null, title = '', status = 'spark', body = '', tags = [], go = true, top = false, extra = {} } = {}) {
+async function createPage({ parent = null, title = '', status, body = '', tags = [], go = true, top = false, extra = {} } = {}) {
   const id = newPageId();
   const orders = state.pages.map((s) => s.order ?? 0);
   // 보드에서 바로 적은 카드는 맨 위로, 나머지는 맨 아래로
   const order = !orders.length ? 1 : top ? Math.min(...orders) - 1 : Math.max(...orders) + 1;
+  // 폴더 바로 아래 새 문서면 그 폴더 템플릿의 상태·틀을 쓴다
+  const parentPage = parent ? byId(parent) : null;
+  if (!extra.kind && isFolder(parentPage)) {
+    const tpl = tplOf(parentPage);
+    if (!body && tpl.doc) body = tpl.doc();
+    if (!title && tpl.title) title = tpl.title();
+  }
+  if (!status) status = (statusesFor(parentPage ? { parent, kind: null, id: null } : null) || STATUSES)[0].key;
   const meta = { title, status, parent, order, tags, ...extra };
   upsertListEntry({ id, ...meta, created: new Date().toISOString(), preview: '' });
   const res = await api.save(id, meta, body);
@@ -709,10 +805,9 @@ async function openPage(id) {
     isRetro(data.meta) ? null : menuItem({ icon: isFolder(data.meta) ? '📄' : '📁', label: isFolder(data.meta) ? '일반 페이지로 바꾸기' : '폴더로 바꾸기', compact: true, onclick: () => {
       closePop();
       const m = state.page.meta;
-      if (isFolder(m)) delete m.kind; else { m.kind = 'folder'; m.view = m.view || 'board'; if (!m.icon) m.icon = '📁'; }
-      upsertListEntry({ id, kind: m.kind || null, icon: m.icon });
-      savePage.flush();
-      setTimeout(route, 300);
+      const apply = () => { upsertListEntry({ id, kind: m.kind || null, icon: m.icon, tpl: m.tpl || null, view: m.view }); savePage.flush(); setTimeout(route, 300); };
+      if (isFolder(m)) { delete m.kind; apply(); }
+      else openTemplatePicker((t) => { m.kind = 'folder'; m.view = t.view; m.tpl = t.id; if (!m.icon) m.icon = t.icon; apply(); });
     } }),
     menuItem({ icon: '📄', label: `data/pages/${id}.md`, compact: true, onclick: () => { navigator.clipboard?.writeText(`data/pages/${id}.md`); closePop(); toast('파일 경로를 복사했어요'); } }),
     h('div', { class: 'pop-sep' }),
@@ -815,11 +910,11 @@ function statusPill(key) {
 
 function renderProps(meta) {
   if (isRetro(meta)) return renderRetroProps(meta);
-  if (isFolder(meta)) return h('div', { class: 'folder-desc prop-muted' }, `📁 폴더 · 만든 날 ${fmtDate(meta.created)}`);
+  if (isFolder(meta)) { const t = tplOf(meta); return h('div', { class: 'folder-desc prop-muted' }, `${t.icon} ${t.name} 템플릿 · 만든 날 ${fmtDate(meta.created)}`); }
   const props = h('div', { class: 'props' });
   // 상태
   const statusV = h('div', { class: 'prop-v click' }, statusPill(meta.status));
-  statusV.addEventListener('click', () => openPop(statusV, STATUSES.map((s) => menuItem({
+  statusV.addEventListener('click', () => openPop(statusV, statusesFor(meta).map((s) => menuItem({
     compact: true, icon: s.icon, label: s.label,
     onclick: () => { meta.status = s.key; statusV.innerHTML = ''; statusV.append(statusPill(s.key)); closePop(); savePage(); },
   }))));
@@ -1738,15 +1833,16 @@ function renderRetro(period) {
 }
 
 // ---------- 보드 칸 (메인 보드·폴더 공용) ----------
-function boardColumns(pages, { parent = null, group } = {}) {
-  const cols = h('div', { class: 'columns' });
-  for (const s of STATUSES) {
-    const items = pages.filter((p) => (p.status || 'spark') === s.key)
+function boardColumns(pages, { parent = null, group, statuses = STATUSES } = {}) {
+  const cols = h('div', { class: `columns cols-${statuses.length}` });
+  const colOf = (p) => (statuses.some((s) => s.key === p.status) ? p.status : statuses[0].key);
+  for (const s of statuses) {
+    const items = pages.filter((p) => colOf(p) === s.key)
       .sort((a, b) => (a.order ?? 0) - (b.order ?? 0) || String(b.created).localeCompare(String(a.created)));
     const col = h('div', { class: 'col', 'data-status': s.key },
       h('div', { class: 'col-head' }, statusPill(s.key), h('span', { class: 'count' }, String(items.length)),
         h('button', { class: 'icon-btn sm add', title: '새 카드', onclick: () => createPage({ status: s.key, parent }) }, '＋')));
-    if (!items.length) col.append(h('div', { class: 'col-empty' }, s.key === 'spark' && group === undefined ? '위 입력칸에 아무거나 적어보세요' : TOUCH ? '아직 없어요' : '카드를 여기로 끌어오세요'));
+    if (!items.length) col.append(h('div', { class: 'col-empty' }, s.key === statuses[0].key && group === undefined && !parent ? '위 입력칸에 아무거나 적어보세요' : TOUCH ? '아직 없어요' : '카드를 여기로 끌어오세요'));
     items.forEach((p) => col.append(boardCard(p)));
     bindColumnDrop(col, s.key, group);
     cols.append(col);
@@ -1786,7 +1882,8 @@ function boardGroups(pages) {
   for (const { folder, pages: list } of groups) {
     const key = groupKey(folder?.id);
     const closed = !!collapsed[key];
-    const counts = STATUSES.map((s) => list.filter((p) => (p.status || 'spark') === s.key).length);
+    const sts = folder ? statusesFor(folder) : STATUSES;
+    const counts = sts.map((s) => list.filter((p) => (sts.some((x) => x.key === p.status) ? p.status : sts[0].key) === s.key).length);
     const head = h('div', { class: 'group-head' },
       h('button', { class: `group-toggle ${closed ? '' : 'open'}`, 'aria-expanded': String(!closed), onclick: () => {
         collapsed[key] = !closed;
@@ -1797,11 +1894,11 @@ function boardGroups(pages) {
         h('span', {}, folder ? (folder.icon || '📁') : '📄'),
         h('span', { class: 'group-name' }, folder ? (folder.title || '제목 없는 폴더') : '폴더 밖'),
         h('span', { class: 'count' }, String(list.length))),
-      closed ? h('span', { class: 'group-mini' }, STATUSES.map((s, i) => counts[i] ? h('span', {}, `${s.icon} ${counts[i]}`) : null)) : null,
+      closed ? h('span', { class: 'group-mini' }, sts.map((s, i) => counts[i] ? h('span', {}, `${s.icon} ${counts[i]}`) : null)) : null,
       h('span', { style: 'flex:1' }),
       folder ? h('a', { class: 'group-open', href: `#/p/${folder.id}` }, '폴더 열기 →') : null);
     wrap.append(h('section', { class: `group ${closed ? 'closed' : ''}` }, head,
-      closed ? null : boardColumns(list, { parent: folder?.id || null, group: folder?.id || null })));
+      closed ? null : boardColumns(list, { parent: folder?.id || null, group: folder?.id || null, statuses: sts })));
   }
   return wrap;
 }
@@ -1838,6 +1935,13 @@ function folderCollection(folder) {
       h('div', { class: 'folder-bar' },
         h('div', { class: 'tabs view-tabs' }, FOLDER_VIEWS.map((v) => h('button', { class: `tab ${view === v.key ? 'on' : ''}`, onclick: () => { meta.view = v.key; savePage(); draw(); } }, `${v.icon} ${v.label}`))),
         h('span', { class: 'spacer' }),
+        h('button', { class: 'btn ghost', title: '템플릿 바꾸기', onclick: () => openTemplatePicker((t) => {
+          if (!meta.title || meta.title === tplOf(meta).name) meta.title = t.id === 'blank' ? meta.title : t.name;
+          meta.tpl = t.id; meta.view = t.view;
+          if (!meta.icon || FOLDER_TEMPLATES.some((x) => x.icon === meta.icon)) meta.icon = t.icon;
+          upsertListEntry({ id: folder.id, tpl: t.id, view: t.view, icon: meta.icon, title: meta.title });
+          savePage(); route();
+        }, meta.tpl || 'idea') }, `${tplOf(meta).icon} ${tplOf(meta).name} ▾`),
         h('button', { class: 'btn ghost', onclick: () => createFolder(folder.id) }, '📁 하위 폴더'),
         h('button', { class: 'btn', onclick: () => createPage({ parent: folder.id }) }, '＋ 새 문서')),
       h('form', { class: 'capture', onsubmit: add }, h('span', {}, '💡'), input, h('span', { class: 'hint' }, 'Enter로 추가')),
@@ -1846,7 +1950,7 @@ function folderCollection(folder) {
       wrap.append(h('div', { class: 'folder-subs' }, subFolders.map((f) => h('a', { class: 'folder-chip', href: `#/p/${f.id}` },
         h('span', {}, f.icon || '📁'), h('span', {}, f.title || '제목 없는 폴더'), h('span', { class: 'count' }, String(childrenOf(f.id).length))))));
     }
-    if (view === 'board') wrap.append(boardColumns(docs, { parent: folder.id }));
+    if (view === 'board') wrap.append(boardColumns(docs, { parent: folder.id, statuses: statusesFor({ ...meta, kind: 'folder' }) }));
     else if (!docs.length) wrap.append(h('div', { class: 'col-empty' }, '아직 문서가 없어요. 위 입력칸에 적거나 「＋ 새 문서」를 눌러보세요'));
     else if (view === 'gallery') {
       const sorted = [...docs].sort((a, b) => String(b.updated || '').localeCompare(String(a.updated || '')));
@@ -1951,11 +2055,11 @@ function boardCard(p, opts = {}) {
     const sb = h('button', { class: 'card-status', title: '상태 바꾸기', 'aria-label': '상태 바꾸기', onclick: (e) => {
       e.preventDefault();
       e.stopPropagation();
-      openPop(sb, STATUSES.map((s) => menuItem({
+      openPop(sb, statusesFor(byId(p.id) || p).map((s) => menuItem({
         compact: true, icon: s.icon, label: s.label,
         onclick: async () => {
           closePop();
-          if ((p.status || 'spark') === s.key) return;
+          if (p.status === s.key) return;
           const order = Math.min(0, ...state.pages.map((x) => x.order ?? 0)) - 1;
           Object.assign(byId(p.id), { status: s.key, order });
           refreshView();
